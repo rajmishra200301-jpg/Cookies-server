@@ -5,324 +5,50 @@ const WebSocket = require('ws');
 const path = require('path');
 const http = require('http');
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 20144;
 
-// ==================== ANTI-CRASH & AUTO-RECOVERY SYSTEM ====================
-class AntiCrashSystem {
-    constructor() {
-        this.lastHeartbeat = Date.now();
-        this.crashCount = 0;
-        this.maxCrashes = 10;
-        this.crashWindow = 3600000;
-        this.crashHistory = [];
-        this.healthCheckInterval = 30000;
-        this.autoRecovery = true;
-        this.recoveryAttempts = 0;
-        this.maxRecoveryAttempts = 5;
-        this.memoryThreshold = 0.9;
-        this.healthStatus = 'healthy';
-        this.performanceMetrics = {
-            memoryUsage: 0,
-            cpuUsage: 0,
-            activeConnections: 0,
-            wsConnections: 0,
-            sessionsCount: 0,
-            uptime: 0
-        };
-    }
+// ==================== CONFIGURATION ====================
+const CONFIG = {
+    MAX_SESSIONS: 10000,
+    SESSION_RETENTION_DAYS: 30,
+    AUTO_RECOVERY_INTERVAL: 60000,
+    HEARTBEAT_INTERVAL: 30000,
+    LOG_LEVEL: 'minimal',
+    SESSION_AUTO_START: true,
+    PERSISTENT_STORAGE: true
+};
 
-    startMonitoring() {
-        setInterval(() => {
-            this.lastHeartbeat = Date.now();
-            this.checkHealth();
-        }, this.healthCheckInterval);
-
-        setInterval(() => {
-            this.checkMemory();
-        }, 60000);
-
-        setInterval(() => {
-            this.collectMetrics();
-        }, 15000);
-
-        setInterval(() => {
-            this.cleanupStaleSessions();
-        }, 300000);
-
-        // Session auto-recovery check every 2 minutes
-        setInterval(() => {
-            this.checkAndRecoverDeadSessions();
-        }, 120000);
-
-        console.log('🛡️ Anti-crash system initialized');
-    }
-
-    checkHealth() {
-        const now = Date.now();
-        const timeSinceHeartbeat = now - this.lastHeartbeat;
-        
-        if (timeSinceHeartbeat > 120000) {
-            console.warn('⚠️ Health check warning: No recent heartbeat');
-            this.healthStatus = 'warning';
-            
-            if (this.autoRecovery) {
-                this.performRecovery();
+// ==================== MINIMAL LOGGER ====================
+class MinimalLogger {
+    static log(message, level = 'info') {
+        if (CONFIG.LOG_LEVEL === 'minimal') {
+            const now = new Date().toISOString().split('T')[1].split('.')[0];
+            const levels = ['error', 'warn'];
+            if (levels.includes(level)) {
+                console.log(`[${now}] ${level.toUpperCase()}: ${message}`);
             }
         } else {
-            this.healthStatus = 'healthy';
-        }
-
-        const recentCrashes = this.crashHistory.filter(
-            crashTime => now - crashTime < this.crashWindow
-        );
-        
-        if (recentCrashes.length > this.maxCrashes) {
-            console.error('🚨 Excessive crashes detected! Initiating emergency procedures');
-            this.healthStatus = 'critical';
-            this.emergencyShutdown();
+            console.log(`[${new Date().toISOString()}] ${level.toUpperCase()}: ${message}`);
         }
     }
-
-    checkMemory() {
-        const used = process.memoryUsage();
-        const memoryUsage = used.heapUsed / used.heapTotal;
-        
-        this.performanceMetrics.memoryUsage = memoryUsage;
-        
-        if (memoryUsage > this.memoryThreshold) {
-            console.warn(`⚠️ High memory usage: ${(memoryUsage * 100).toFixed(2)}%`);
-            
-            if (global.gc) {
-                global.gc();
-                console.log('🧹 Forced garbage collection');
-            }
-            
-            if (memoryUsage > 0.95) {
-                this.clearMemoryCaches();
-            }
-        }
+    
+    static error(message) {
+        this.log(message, 'error');
     }
-
-    clearMemoryCaches() {
-        if (typeof global.gc === 'function') {
-            global.gc();
-        }
-        
-        Object.keys(require.cache).forEach(key => {
-            if (!key.includes('node_modules') && 
-                !key.includes('fca-mafiya') && 
-                !key.includes('express')) {
-                delete require.cache[key];
-            }
-        });
-        
-        console.log('🧹 Memory caches cleared');
+    
+    static warn(message) {
+        this.log(message, 'warn');
     }
-
-    collectMetrics() {
-        const used = process.memoryUsage();
-        this.performanceMetrics = {
-            memoryUsage: used.heapUsed / used.heapTotal,
-            cpuUsage: process.cpuUsage().user / 1000000,
-            activeConnections: server && server._connections ? server._connections : 0,
-            wsConnections: wss ? wss.clients.size : 0,
-            sessionsCount: activeSessions.size,
-            uptime: process.uptime()
-        };
-    }
-
-    cleanupStaleSessions() {
-        const now = Date.now();
-        let cleaned = 0;
-        
-        for (const [sessionId, session] of activeSessions) {
-            if (session.lastActivity && (now - session.lastActivity > 3600000)) {
-                if (session.messager) {
-                    session.messager.stop();
-                }
-                if (session.lockSystem) {
-                    session.lockSystem.stop();
-                }
-                if (sessionRefreshTracker.has(sessionId)) {
-                    clearTimeout(sessionRefreshTracker.get(sessionId));
-                    sessionRefreshTracker.delete(sessionId);
-                }
-                if (sessionHeartbeats.has(sessionId)) {
-                    clearInterval(sessionHeartbeats.get(sessionId));
-                    sessionHeartbeats.delete(sessionId);
-                }
-                activeSessions.delete(sessionId);
-                cleaned++;
-            }
+    
+    static info(message) {
+        if (CONFIG.LOG_LEVEL !== 'minimal') {
+            this.log(message, 'info');
         }
-        
-        if (cleaned > 0) {
-            console.log(`🧹 Cleaned ${cleaned} stale sessions`);
-        }
-    }
-
-    checkAndRecoverDeadSessions() {
-        const now = Date.now();
-        let recovered = 0;
-        
-        for (const [sessionId, session] of activeSessions) {
-            // If session hasn't had activity for 5 minutes
-            if (session.lastActivity && (now - session.lastActivity > 300000)) {
-                console.log(`🔄 Attempting to recover dead session: ${sessionId}`);
-                
-                if (session.type === 'locking' || session.type === 'locking_advanced') {
-                    recoverLockSession(sessionId);
-                    recovered++;
-                } else if (session.type === 'one_time_messaging') {
-                    recoverMessagingSession(sessionId);
-                    recovered++;
-                }
-            }
-        }
-        
-        if (recovered > 0) {
-            console.log(`✅ Recovered ${recovered} dead sessions`);
-        }
-    }
-
-    recordCrash(error) {
-        const now = Date.now();
-        this.crashHistory.push(now);
-        this.crashCount++;
-        
-        this.crashHistory = this.crashHistory.filter(
-            crashTime => now - crashTime < this.crashWindow
-        );
-        
-        console.error(`🚨 Crash recorded #${this.crashCount}:`, error.message);
-        
-        const crashLog = {
-            timestamp: new Date().toISOString(),
-            error: error.message,
-            stack: error.stack,
-            crashCount: this.crashCount,
-            metrics: this.performanceMetrics
-        };
-        
-        try {
-            const logDir = path.join(__dirname, 'logs');
-            if (!fs.existsSync(logDir)) {
-                fs.mkdirSync(logDir, { recursive: true });
-            }
-            
-            const logFile = path.join(logDir, 'crashes.json');
-            let crashes = [];
-            
-            if (fs.existsSync(logFile)) {
-                crashes = JSON.parse(fs.readFileSync(logFile, 'utf8'));
-            }
-            
-            crashes.push(crashLog);
-            fs.writeFileSync(logFile, JSON.stringify(crashes, null, 2));
-        } catch (logError) {
-            console.error('Failed to write crash log:', logError);
-        }
-    }
-
-    performRecovery() {
-        if (this.recoveryAttempts >= this.maxRecoveryAttempts) {
-            console.error('🚨 Max recovery attempts reached');
-            return;
-        }
-        
-        this.recoveryAttempts++;
-        console.log(`🔄 Performing recovery attempt #${this.recoveryAttempts}`);
-        
-        try {
-            this.clearMemoryCaches();
-            
-            if (wss) {
-                wss.clients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({
-                            type: 'recovery',
-                            message: 'System recovery in progress'
-                        }));
-                    }
-                });
-            }
-            
-            for (const [sessionId, session] of activeSessions) {
-                if (session.lockSystem && session.lockSystem.isActive) {
-                    session.lockSystem.startSafeMonitoring();
-                }
-            }
-            
-            console.log('✅ Recovery completed successfully');
-            this.recoveryAttempts = 0;
-        } catch (recoveryError) {
-            console.error('❌ Recovery failed:', recoveryError);
-        }
-    }
-
-    emergencyShutdown() {
-        console.log('🚨 EMERGENCY SHUTDOWN INITIATED');
-        
-        this.saveAllSessions();
-        
-        for (const [sessionId, session] of activeSessions) {
-            if (session.messager) {
-                session.messager.stop();
-            }
-            if (session.lockSystem) {
-                session.lockSystem.stop();
-            }
-        }
-        
-        for (const [sessionId, timer] of sessionRefreshTracker) {
-            clearTimeout(timer);
-        }
-        
-        for (const [sessionId, heartbeat] of sessionHeartbeats) {
-            clearInterval(heartbeat);
-        }
-        
-        console.log('🛑 Emergency shutdown complete');
-    }
-
-    saveAllSessions() {
-        try {
-            const sessionsDir = path.join(__dirname, 'sessions', 'backup');
-            if (!fs.existsSync(sessionsDir)) {
-                fs.mkdirSync(sessionsDir, { recursive: true });
-            }
-            
-            const backupFile = path.join(sessionsDir, `backup_${Date.now()}.json`);
-            const backupData = {
-                timestamp: new Date().toISOString(),
-                activeSessions: Array.from(activeSessions.entries()),
-                permanentSessions: Array.from(permanentSessions.entries())
-            };
-            
-            fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2));
-            console.log(`💾 Sessions backed up to: ${backupFile}`);
-        } catch (error) {
-            console.error('Failed to backup sessions:', error);
-        }
-    }
-
-    getStatus() {
-        return {
-            healthStatus: this.healthStatus,
-            crashCount: this.crashCount,
-            recoveryAttempts: this.recoveryAttempts,
-            lastHeartbeat: new Date(this.lastHeartbeat).toISOString(),
-            performanceMetrics: this.performanceMetrics,
-            uptime: process.uptime()
-        };
     }
 }
 
 // Create HTTP server
 const server = http.createServer(app);
-
-// Initialize Anti-Crash System
-const antiCrash = new AntiCrashSystem();
 
 // Middleware
 app.use(express.static('public'));
@@ -338,132 +64,34 @@ const sessionHeartbeats = new Map();
 // WebSocket Server
 const wss = new WebSocket.Server({ server });
 
-// ==================== SESSION HEARTBEAT SYSTEM ====================
-function startSessionHeartbeat(sessionId) {
-    // Clear existing heartbeat
-    if (sessionHeartbeats.has(sessionId)) {
-        clearInterval(sessionHeartbeats.get(sessionId));
-    }
-    
-    // Start new heartbeat
-    const heartbeatInterval = setInterval(async () => {
-        try {
-            const session = activeSessions.get(sessionId);
-            if (!session) {
-                clearInterval(heartbeatInterval);
-                sessionHeartbeats.delete(sessionId);
-                return;
-            }
-            
-            // Update last activity
-            session.lastActivity = Date.now();
-            session.heartbeat = Date.now();
-            
-            // Check if session is still active
-            if (session.type === 'locking' || session.type === 'locking_advanced') {
-                if (session.lockSystem) {
-                    session.lockSystem.heartbeat = Date.now();
-                    session.lockSystem.consecutiveFailures = 0;
-                    
-                    // Send a keep-alive ping
-                    await keepLockSessionAlive(sessionId);
-                }
-            } else if (session.type === 'one_time_messaging') {
-                if (session.messager) {
-                    session.messager.lastActivity = Date.now();
-                }
-            }
-            
-            // Auto-refresh permanent session every hour
-            if (session.lastRefresh && (Date.now() - session.lastRefresh > 3600000)) {
-                if (session.api && session.userId && session.groupUID) {
-                    refreshSession(sessionId, session.api, session.userId, session.groupUID, session.type);
-                    session.lastRefresh = Date.now();
-                    console.log(`🔄 Session ${sessionId} auto-refreshed`);
-                }
-            }
-            
-            console.log(`💓 Session ${sessionId} heartbeat OK`);
-            
-        } catch (error) {
-            console.error(`❌ Session ${sessionId} heartbeat failed:`, error.message);
-            antiCrash.recordCrash(error);
-        }
-    }, 30000); // Every 30 seconds
-    
-    sessionHeartbeats.set(sessionId, heartbeatInterval);
-}
-
-async function keepLockSessionAlive(sessionId) {
-    const session = activeSessions.get(sessionId);
-    if (!session || !session.lockSystem) return;
-    
-    try {
-        if (session.api && session.groupUID) {
-            // Lightweight API call to keep session alive
-            session.api.getThreadInfo(session.groupUID, (err, info) => {
-                if (!err && info) {
-                    session.lockSystem.heartbeat = Date.now();
-                    session.lockSystem.consecutiveFailures = 0;
-                }
-            });
-        }
-    } catch (error) {
-        // Silent error
-    }
-}
-
-function recoverLockSession(sessionId) {
-    const session = activeSessions.get(sessionId);
-    if (!session) return;
-    
-    try {
-        if (session.lockSystem) {
-            if (session.lockSystem.isPaused) {
-                session.lockSystem.resume();
-                session.status = 'active';
-                session.lastActivity = Date.now();
-                console.log(`✅ Lock session ${sessionId} recovered from paused state`);
-            }
-            
-            // Restart monitoring if stopped
-            if (!session.lockSystem.isActive && session.lockSystem.isActive !== undefined) {
-                session.lockSystem.startSafeMonitoring();
-                session.status = 'active';
-                session.lastActivity = Date.now();
-                console.log(`✅ Lock session ${sessionId} monitoring restarted`);
-            }
-        }
-    } catch (error) {
-        console.error(`❌ Failed to recover lock session ${sessionId}:`, error.message);
-    }
-}
-
-function recoverMessagingSession(sessionId) {
-    const session = activeSessions.get(sessionId);
-    if (!session) return;
-    
-    try {
-        if (session.messager && !session.messager.isRunning) {
-            session.messager.start();
-            session.status = 'active';
-            session.lastActivity = Date.now();
-            console.log(`✅ Messaging session ${sessionId} recovered`);
-        }
-    } catch (error) {
-        console.error(`❌ Failed to recover messaging session ${sessionId}:`, error.message);
-    }
-}
-
 // ==================== PERMANENT SESSION SYSTEM ====================
 function savePermanentSession(sessionId, api, userId, type = 'messaging') {
     try {
         if (!api) return false;
-        const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
-        if (!fs.existsSync(path.dirname(sessionPath))) {
-            fs.mkdirSync(path.dirname(sessionPath), { recursive: true });
+        
+        // Check session limit
+        if (permanentSessions.size >= CONFIG.MAX_SESSIONS) {
+            const oldestSession = Array.from(permanentSessions.entries())
+                .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+            if (oldestSession) {
+                permanentSessions.delete(oldestSession[0]);
+                try {
+                    const oldPath = path.join(__dirname, 'sessions', `permanent_${oldestSession[0]}.json`);
+                    if (fs.existsSync(oldPath)) {
+                        fs.unlinkSync(oldPath);
+                    }
+                } catch (e) {}
+            }
         }
-        const appState = api.getAppState();
+        
+        const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
+        const sessionDir = path.dirname(sessionPath);
+        
+        if (!fs.existsSync(sessionDir)) {
+            fs.mkdirSync(sessionDir, { recursive: true });
+        }
+        
+        const appState = api.getAppState ? api.getAppState() : null;
         const sessionData = {
             sessionId,
             appState,
@@ -472,13 +100,23 @@ function savePermanentSession(sessionId, api, userId, type = 'messaging') {
             createdAt: Date.now(),
             lastUsed: Date.now(),
             lastRefresh: Date.now(),
-            lastHeartbeat: Date.now()
+            isActive: true,
+            autoStart: true,
+            data: null
         };
+        
+        if (type === 'advanced_locking') {
+            sessionData.groupUID = api.groupUID || null;
+        }
+        
         fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
         permanentSessions.set(sessionId, sessionData);
+        
+        startSessionHeartbeat(sessionId);
+        
         return true;
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Save session error: ${error.message}`);
         return false;
     }
 }
@@ -486,20 +124,31 @@ function savePermanentSession(sessionId, api, userId, type = 'messaging') {
 function loadPermanentSession(sessionId) {
     try {
         if (permanentSessions.has(sessionId)) {
-            return permanentSessions.get(sessionId);
+            const session = permanentSessions.get(sessionId);
+            sessionHeartbeats.set(sessionId, Date.now());
+            return session;
         }
+        
         const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
         if (fs.existsSync(sessionPath)) {
             const fileStats = fs.statSync(sessionPath);
             if (fileStats.size > 100) {
                 const sessionData = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+                
+                const age = Date.now() - sessionData.createdAt;
+                const maxAge = CONFIG.SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+                
+                if (age > maxAge) {
+                    fs.unlinkSync(sessionPath);
+                    return null;
+                }
+                
                 permanentSessions.set(sessionId, sessionData);
+                sessionHeartbeats.set(sessionId, Date.now());
                 return sessionData;
             }
         }
-    } catch (error) {
-        antiCrash.recordCrash(error);
-    }
+    } catch (error) {}
     return null;
 }
 
@@ -513,11 +162,120 @@ function getSessionsByUserId(userId) {
                 createdAt: session.createdAt,
                 lastUsed: session.lastUsed,
                 lastRefresh: session.lastRefresh,
-                lastHeartbeat: session.lastHeartbeat
+                isActive: session.isActive || false,
+                groupUID: session.groupUID || null
             });
         }
     }
     return sessions;
+}
+
+// ==================== SESSION HEARTBEAT SYSTEM ====================
+function startSessionHeartbeat(sessionId) {
+    sessionHeartbeats.set(sessionId, Date.now());
+}
+
+function checkSessionHeartbeat(sessionId) {
+    const lastBeat = sessionHeartbeats.get(sessionId);
+    if (!lastBeat) return false;
+    
+    const timeSinceBeat = Date.now() - lastBeat;
+    return timeSinceBeat < (CONFIG.HEARTBEAT_INTERVAL * 3);
+}
+
+// ==================== AUTO RECOVERY SYSTEM ====================
+class AutoRecoverySystem {
+    constructor() {
+        this.recoveryInterval = null;
+        this.isRecovering = false;
+    }
+    
+    start() {
+        if (this.recoveryInterval) clearInterval(this.recoveryInterval);
+        
+        this.recoveryInterval = setInterval(() => {
+            this.checkAndRecover();
+        }, CONFIG.AUTO_RECOVERY_INTERVAL);
+        
+        MinimalLogger.log('Auto-recovery system started');
+    }
+    
+    async checkAndRecover() {
+        if (this.isRecovering) return;
+        this.isRecovering = true;
+        
+        try {
+            for (const [sessionId, session] of activeSessions) {
+                if (!checkSessionHeartbeat(sessionId)) {
+                    MinimalLogger.warn(`Session ${sessionId} missed heartbeat, attempting recovery`);
+                    await this.recoverSession(sessionId, session);
+                }
+            }
+            
+            for (const [sessionId, sessionData] of permanentSessions) {
+                if (sessionData.isActive && !activeSessions.has(sessionId)) {
+                    if (CONFIG.SESSION_AUTO_START) {
+                        MinimalLogger.log(`Restarting saved session: ${sessionId}`);
+                        await this.restartSavedSession(sessionId, sessionData);
+                    }
+                }
+            }
+            
+            this.cleanupHeartbeats();
+            
+        } catch (error) {
+            MinimalLogger.error(`Recovery error: ${error.message}`);
+        } finally {
+            this.isRecovering = false;
+        }
+    }
+    
+    async recoverSession(sessionId, session) {
+        try {
+            if (session.type === 'advanced_locking' && session.lockSystem) {
+                session.lockSystem.start();
+                startSessionHeartbeat(sessionId);
+                MinimalLogger.log(`Lock session ${sessionId} recovered`);
+            } else if (session.type === 'one_time_messaging' && session.messager) {
+                session.messager.start();
+                startSessionHeartbeat(sessionId);
+                MinimalLogger.log(`Messaging session ${sessionId} recovered`);
+            } else if (session.type === 'single_messaging' && session.messaging) {
+                session.messaging.start();
+                startSessionHeartbeat(sessionId);
+                MinimalLogger.log(`Single messaging session ${sessionId} recovered`);
+            }
+        } catch (error) {
+            MinimalLogger.error(`Failed to recover session ${sessionId}: ${error.message}`);
+        }
+    }
+    
+    async restartSavedSession(sessionId, sessionData) {
+        try {
+            if (sessionData.type === 'advanced_locking') {
+                MinimalLogger.log(`Advanced lock session ${sessionId} needs manual restart`);
+            }
+            startSessionHeartbeat(sessionId);
+        } catch (error) {
+            MinimalLogger.error(`Failed to restart saved session ${sessionId}: ${error.message}`);
+        }
+    }
+    
+    cleanupHeartbeats() {
+        const now = Date.now();
+        for (const [sessionId, lastBeat] of sessionHeartbeats.entries()) {
+            if (now - lastBeat > CONFIG.HEARTBEAT_INTERVAL * 10) {
+                sessionHeartbeats.delete(sessionId);
+            }
+        }
+    }
+    
+    stop() {
+        if (this.recoveryInterval) {
+            clearInterval(this.recoveryInterval);
+            this.recoveryInterval = null;
+        }
+    }
 }
 
 // ==================== AUTO REFRESH SYSTEM ====================
@@ -525,25 +283,34 @@ function setupSessionAutoRefresh(sessionId, api, userId, groupUID, type, refresh
     if (sessionRefreshTracker.has(sessionId)) {
         clearTimeout(sessionRefreshTracker.get(sessionId));
     }
-    const refreshTimer = setTimeout(() => {
-        refreshSession(sessionId, api, userId, groupUID, type);
+    
+    const refreshTimer = setTimeout(async () => {
+        try {
+            await refreshSession(sessionId, api, userId, groupUID, type);
+        } catch (error) {
+            MinimalLogger.error(`Refresh failed for ${sessionId}: ${error.message}`);
+        }
     }, refreshTime);
+    
     sessionRefreshTracker.set(sessionId, refreshTimer);
 }
 
-function refreshSession(sessionId, api, userId, groupUID, type) {
+async function refreshSession(sessionId, api, userId, groupUID, type) {
     try {
-        const appState = api.getAppState();
+        const appState = api.getAppState ? api.getAppState() : null;
         const sessionData = {
             sessionId,
             appState,
             userId,
             type,
+            groupUID,
             createdAt: Date.now(),
             lastUsed: Date.now(),
             lastRefresh: Date.now(),
-            lastHeartbeat: Date.now()
+            isActive: true,
+            autoStart: true
         };
+        
         const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
         fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
         permanentSessions.set(sessionId, sessionData);
@@ -553,22 +320,19 @@ function refreshSession(sessionId, api, userId, groupUID, type) {
             setupSessionAutoRefresh(sessionId, api, userId, groupUID, type, session.refreshTime);
         }
         
-        console.log(`🔄 Session ${sessionId} refreshed successfully`);
+        MinimalLogger.log(`Session ${sessionId} refreshed`);
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Refresh error: ${error.message}`);
     }
 }
 
-// ==================== SILENT LOGIN SYSTEM ====================
+// ==================== SILENT LOGIN SYSTEM (FIXED - ORIGINAL FROM FIRST SCRIPT) ====================
 function silentLogin(cookieString, callback) {
     const loginOptions = {
         appState: null,
         userAgent: 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
         forceLogin: false,
-        logLevel: 'silent',
-        autoLogAppEvents: false,
-        listenEvents: false,
-        selfListen: false
+        logLevel: 'silent'
     };
 
     const loginMethods = [
@@ -670,10 +434,7 @@ function silentLoginWithPermanentSession(sessionId, callback) {
         appState: sessionData.appState,
         userAgent: 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36',
         forceLogin: false,
-        logLevel: 'silent',
-        autoLogAppEvents: false,
-        listenEvents: false,
-        selfListen: false
+        logLevel: 'silent'
     };
     
     wiegine.login(loginOptions, (err, api) => {
@@ -681,17 +442,149 @@ function silentLoginWithPermanentSession(sessionId, callback) {
             callback(null);
         } else {
             sessionData.lastUsed = Date.now();
-            sessionData.lastHeartbeat = Date.now();
             permanentSessions.set(sessionId, sessionData);
             const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
             try {
                 fs.writeFileSync(sessionPath, JSON.stringify(sessionData, null, 2));
-            } catch (e) {
-                antiCrash.recordCrash(e);
-            }
+            } catch (e) {}
+            
+            startSessionHeartbeat(sessionId);
+            
             callback(api);
         }
     });
+}
+
+// ==================== SAFE MESSAGING SYSTEM ====================
+class SafePermanentMessaging {
+    constructor(sessionId, cookie, groupUID, prefix, delay, messages) {
+        this.sessionId = sessionId;
+        this.cookie = cookie;
+        this.groupUID = groupUID;
+        this.prefix = prefix;
+        this.delay = delay * 1000;
+        this.originalMessages = messages;
+        this.messageQueue = [];
+        this.isRunning = false;
+        this.messageIndex = 0;
+        this.api = null;
+        this.messagesSent = 0;
+        this.startTime = Date.now();
+        this.consecutiveFailures = 0;
+        this.maxFailures = 3;
+        this.heartbeatInterval = null;
+    }
+
+    async initialize() {
+        try {
+            this.api = await new Promise((resolve) => {
+                silentLogin(this.cookie, (fbApi) => {
+                    resolve(fbApi);
+                });
+            });
+            if (this.api) {
+                const userId = this.api.getCurrentUserID();
+                savePermanentSession(this.sessionId, this.api, userId, 'single_messaging');
+                
+                this.startHeartbeat();
+                return true;
+            }
+        } catch (error) {
+            MinimalLogger.error(`Messaging init error: ${error.message}`);
+        }
+        return false;
+    }
+
+    start() {
+        if (this.isRunning) return;
+        this.isRunning = true;
+        this.messageQueue = [...this.originalMessages];
+        this.processQueue();
+        MinimalLogger.log(`Messaging started: ${this.sessionId}`);
+    }
+
+    async processQueue() {
+        while (this.isRunning && this.messageQueue.length > 0) {
+            startSessionHeartbeat(this.sessionId);
+            
+            if (this.consecutiveFailures >= this.maxFailures) {
+                this.stop();
+                break;
+            }
+
+            const message = this.messageQueue.shift();
+            const messageText = this.prefix + message;
+            const messageNumber = this.messageIndex + 1;
+
+            const success = await this.sendMessage(messageText);
+            if (success) {
+                this.messageIndex++;
+                this.messagesSent++;
+                this.consecutiveFailures = 0;
+                const session = activeSessions.get(this.sessionId);
+                if (session) {
+                    session.messagesSent = this.messagesSent;
+                    updateSessionStatus(this.sessionId);
+                }
+            } else {
+                this.messageQueue.unshift(message);
+                this.consecutiveFailures++;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, this.delay));
+        }
+        if (this.messageQueue.length === 0) {
+            this.messageQueue = [...this.originalMessages];
+            this.messageIndex = 0;
+            setTimeout(() => this.processQueue(), 1000);
+        }
+    }
+
+    async sendMessage(messageText) {
+        if (!this.api) {
+            const initialized = await this.initialize();
+            if (!initialized) return false;
+        }
+
+        return new Promise((resolve) => {
+            this.api.sendMessage(messageText, this.groupUID, (err, messageInfo) => {
+                if (err) {
+                    this.api = null;
+                    resolve(false);
+                } else {
+                    resolve(true);
+                }
+            });
+        });
+    }
+
+    startHeartbeat() {
+        if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+        this.heartbeatInterval = setInterval(() => {
+            startSessionHeartbeat(this.sessionId);
+        }, CONFIG.HEARTBEAT_INTERVAL);
+    }
+
+    stop() {
+        this.isRunning = false;
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+        MinimalLogger.log(`Messaging stopped: ${this.sessionId}`);
+    }
+
+    getStatus() {
+        return {
+            sessionId: this.sessionId,
+            isRunning: this.isRunning,
+            messagesSent: this.messagesSent,
+            queueLength: this.messageQueue.length,
+            totalMessages: this.originalMessages.length,
+            consecutiveFailures: this.consecutiveFailures,
+            uptime: Date.now() - this.startTime
+        };
+    }
 }
 
 // ==================== ONE TIME LOGIN MULTI-COOKIE MESSAGER ====================
@@ -710,10 +603,10 @@ class OneTimeLoginMultiCookieMessager {
         this.activeApis = new Map();
         this.messagesSent = 0;
         this.initialized = false;
-        this.lastActivity = Date.now();
-        this.heartbeat = Date.now();
-        this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 5;
+        this.startTime = Date.now();
+        this.consecutiveFailures = 0;
+        this.maxFailures = 3;
+        this.heartbeatInterval = null;
     }
 
     async initializeAllCookiesOnce() {
@@ -741,11 +634,16 @@ class OneTimeLoginMultiCookieMessager {
                     );
                 }
             } catch (error) {
-                antiCrash.recordCrash(error);
+                MinimalLogger.error(`Cookie ${i+1} login failed`);
             }
             await new Promise(resolve => setTimeout(resolve, 2000));
         }
         this.initialized = successCount > 0;
+        
+        if (this.initialized) {
+            this.startHeartbeat();
+        }
+        
         return this.initialized;
     }
 
@@ -753,80 +651,38 @@ class OneTimeLoginMultiCookieMessager {
         if (this.isRunning) return;
         this.isRunning = true;
         this.messageQueue = [...this.originalMessages];
-        this.startHeartbeat();
         this.processQueue();
-    }
-
-    startHeartbeat() {
-        setInterval(() => {
-            this.heartbeat = Date.now();
-            this.lastActivity = Date.now();
-            
-            // Check and reconnect dead cookies
-            this.reconnectDeadCookies();
-        }, 60000); // Check every minute
-    }
-
-    reconnectDeadCookies() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
-        
-        for (let i = 0; i < this.originalCookies.length; i++) {
-            if (!this.activeApis.has(i)) {
-                this.reconnectAttempts++;
-                setTimeout(() => {
-                    this.reconnectCookie(i);
-                }, this.reconnectAttempts * 5000);
-            }
-        }
-    }
-
-    async reconnectCookie(index) {
-        const cookie = this.originalCookies[index];
-        try {
-            const api = await new Promise((resolve) => {
-                silentLogin(cookie, (fbApi) => {
-                    resolve(fbApi);
-                });
-            });
-            if (api) {
-                this.activeApis.set(index, api);
-                this.reconnectAttempts = Math.max(0, this.reconnectAttempts - 1);
-                console.log(`✅ Reconnected cookie ${index + 1} for session ${this.sessionId}`);
-            }
-        } catch (error) {
-            antiCrash.recordCrash(error);
-        }
+        MinimalLogger.log(`Multi-messaging started: ${this.sessionId}`);
     }
 
     async processQueue() {
         while (this.isRunning && this.messageQueue.length > 0) {
-            try {
-                this.lastActivity = Date.now();
-                this.heartbeat = Date.now();
-                const message = this.messageQueue.shift();
-                const messageText = this.prefix + message;
-                const messageNumber = this.messageIndex + 1;
-                this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
-                const cookieNum = this.cookieIndex + 1;
-                const success = await this.sendWithCookie(this.cookieIndex, messageText);
-                if (success) {
-                    this.messageIndex++;
-                    this.messagesSent++;
-                    const session = activeSessions.get(this.sessionId);
-                    if (session) {
-                        session.messagesSent = this.messagesSent;
-                        session.lastActivity = Date.now();
-                        session.heartbeat = Date.now();
-                        updateSessionStatus(this.sessionId);
-                    }
-                } else {
-                    this.messageQueue.unshift(message);
-                }
-                await new Promise(resolve => setTimeout(resolve, this.delay));
-            } catch (error) {
-                antiCrash.recordCrash(error);
-                await new Promise(resolve => setTimeout(resolve, 5000));
+            startSessionHeartbeat(this.sessionId);
+            
+            if (this.consecutiveFailures >= this.maxFailures) {
+                this.stop();
+                break;
             }
+
+            const message = this.messageQueue.shift();
+            const messageText = this.prefix + message;
+            this.cookieIndex = (this.cookieIndex + 1) % this.originalCookies.length;
+            
+            const success = await this.sendWithCookie(this.cookieIndex, messageText);
+            if (success) {
+                this.messageIndex++;
+                this.messagesSent++;
+                this.consecutiveFailures = 0;
+                const session = activeSessions.get(this.sessionId);
+                if (session) {
+                    session.messagesSent = this.messagesSent;
+                    updateSessionStatus(this.sessionId);
+                }
+            } else {
+                this.messageQueue.unshift(message);
+                this.consecutiveFailures++;
+            }
+            await new Promise(resolve => setTimeout(resolve, this.delay));
         }
         if (this.messageQueue.length === 0) {
             this.messageQueue = [...this.originalMessages];
@@ -850,7 +706,6 @@ class OneTimeLoginMultiCookieMessager {
                     return false;
                 }
             } catch (error) {
-                antiCrash.recordCrash(error);
                 return false;
             }
         }
@@ -867,8 +722,20 @@ class OneTimeLoginMultiCookieMessager {
         });
     }
 
+    startHeartbeat() {
+        if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+        this.heartbeatInterval = setInterval(() => {
+            startSessionHeartbeat(this.sessionId);
+        }, CONFIG.HEARTBEAT_INTERVAL);
+    }
+
     stop() {
         this.isRunning = false;
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
+        }
+        MinimalLogger.log(`Multi-messaging stopped: ${this.sessionId}`);
     }
 
     getStatus() {
@@ -881,145 +748,221 @@ class OneTimeLoginMultiCookieMessager {
             messagesSent: this.messagesSent,
             queueLength: this.messageQueue.length,
             totalMessages: this.originalMessages.length,
-            lastActivity: new Date(this.lastActivity).toISOString(),
-            heartbeat: new Date(this.heartbeat).toISOString(),
-            reconnectAttempts: this.reconnectAttempts
+            consecutiveFailures: this.consecutiveFailures,
+            uptime: Date.now() - this.startTime
         };
     }
 }
 
-// ==================== SAFE LOCK SYSTEM (SECONDS BASED) ====================
-class SafePermanentLockSystem {
+// ==================== ADVANCED SAFE LOCK SYSTEM (FIXED - CUSTOM NOTIFICATION ONLY WHEN RESTORE) ====================
+class AdvancedSafeLockSystem {
     constructor(sessionId, api, groupUID) {
         this.sessionId = sessionId;
         this.api = api;
         this.groupUID = groupUID;
+        
+        // Locks
         this.lockedName = null;
         this.lockedNicknames = new Map();
         this.lockedSingleNickname = new Map();
+        
+        // Monitoring intervals (in seconds) - CHANGED: 1-86400 seconds
+        this.groupNameInterval = 60;
+        this.allNicknamesInterval = 60;
+        this.singleNicknameInterval = 60;
+        
+        // Individual timers
+        this.groupNameTimer = null;
+        this.allNicknamesTimer = null;
+        this.singleNicknameTimer = null;
+        
+        // Settings
         this.memberCache = new Map();
-        this.monitoringInterval = null;
         this.isActive = false;
-        this.safeMode = true;
-        this.monitoringIntervalTime = 60000; // Default 60 seconds
-        this.customMessage = "🔒 Locking system is active. Changes reverted automatically.";
-        this.nicknameRestoreDelay = 2000; // 2 seconds between nickname changes
+        this.customMessage = null;
+        this.nicknameRestoreDelay = 2000;
         this.consecutiveFailures = 0;
         this.maxFailures = 3;
-        this.isPaused = false;
-        this.heartbeat = Date.now();
-        this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 3;
-        this.keepAliveInterval = null;
+        this.startTime = Date.now();
+        this.heartbeatInterval = null;
+        
+        // NEW: Track last sent notifications to prevent spam
+        this.lastNotificationSent = {
+            groupName: 0,
+            allNicknames: 0,
+            singleNickname: new Map()
+        };
+        this.notificationCooldown = 30000; // 30 seconds cooldown between notifications
     }
 
     start() {
         if (this.isActive) return;
         this.isActive = true;
-        this.startKeepAlive();
-        this.startSafeMonitoring();
+        this.startIndividualMonitoring();
+        this.startHeartbeat();
+        MinimalLogger.log(`Lock system started: ${this.sessionId}`);
     }
 
     stop() {
-        if (this.monitoringInterval) {
-            clearInterval(this.monitoringInterval);
-            this.monitoringInterval = null;
-        }
-        if (this.keepAliveInterval) {
-            clearInterval(this.keepAliveInterval);
-            this.keepAliveInterval = null;
-        }
         this.isActive = false;
-    }
-
-    pause() {
-        this.isPaused = true;
-        if (this.monitoringInterval) {
-            clearInterval(this.monitoringInterval);
-            this.monitoringInterval = null;
+        this.stopIndividualMonitoring();
+        if (this.heartbeatInterval) {
+            clearInterval(this.heartbeatInterval);
+            this.heartbeatInterval = null;
         }
-        if (this.keepAliveInterval) {
-            clearInterval(this.keepAliveInterval);
-            this.keepAliveInterval = null;
-        }
+        MinimalLogger.log(`Lock system stopped: ${this.sessionId}`);
     }
 
-    resume() {
-        this.isPaused = false;
-        this.startKeepAlive();
-        this.startSafeMonitoring();
+    startHeartbeat() {
+        if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+        this.heartbeatInterval = setInterval(() => {
+            startSessionHeartbeat(this.sessionId);
+        }, CONFIG.HEARTBEAT_INTERVAL);
     }
 
-    startKeepAlive() {
-        if (this.keepAliveInterval) {
-            clearInterval(this.keepAliveInterval);
+    // Individual monitoring control
+    startIndividualMonitoring() {
+        this.stopIndividualMonitoring();
+        
+        if (this.lockedName) {
+            this.startGroupNameMonitoring();
         }
         
-        this.keepAliveInterval = setInterval(() => {
-            if (!this.isPaused && this.api) {
-                this.heartbeat = Date.now();
-                
-                // Send keep-alive ping
-                this.api.getThreadInfo(this.groupUID, (err, info) => {
-                    if (err) {
-                        this.consecutiveFailures++;
-                        if (this.consecutiveFailures >= this.maxFailures) {
-                            this.attemptReconnect();
-                        }
-                    } else {
-                        this.consecutiveFailures = 0;
-                        this.reconnectAttempts = 0;
-                    }
-                });
-            }
-        }, 120000); // Every 2 minutes
-    }
-
-    attemptReconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`❌ Max reconnect attempts reached for session ${this.sessionId}`);
-            return;
+        if (this.lockedNicknames.size > 0) {
+            this.startAllNicknamesMonitoring();
         }
         
-        this.reconnectAttempts++;
-        console.log(`🔄 Attempting reconnect ${this.reconnectAttempts}/${this.maxReconnectAttempts} for session ${this.sessionId}`);
-        
-        // Try to reinitialize API
-        const session = activeSessions.get(this.sessionId);
-        if (session && session.api) {
-            // The API should auto-reconnect internally
-            this.consecutiveFailures = Math.max(0, this.consecutiveFailures - 1);
+        if (this.lockedSingleNickname.size > 0) {
+            this.startSingleNicknameMonitoring();
         }
     }
 
-    setMonitoringInterval(seconds) {
-        this.monitoringIntervalTime = seconds * 1000; // Convert to milliseconds
-        if (this.monitoringInterval) {
-            clearInterval(this.monitoringInterval);
-            this.startSafeMonitoring();
+    stopIndividualMonitoring() {
+        if (this.groupNameTimer) {
+            clearInterval(this.groupNameTimer);
+            this.groupNameTimer = null;
         }
-        return { success: true, message: `Monitoring interval set to ${seconds} seconds` };
+        if (this.allNicknamesTimer) {
+            clearInterval(this.allNicknamesTimer);
+            this.allNicknamesTimer = null;
+        }
+        if (this.singleNicknameTimer) {
+            clearInterval(this.singleNicknameTimer);
+            this.singleNicknameTimer = null;
+        }
+    }
+
+    startGroupNameMonitoring() {
+        if (this.groupNameTimer) clearInterval(this.groupNameTimer);
+        this.groupNameTimer = setInterval(() => {
+            this.monitorGroupName();
+        }, this.groupNameInterval * 1000);
+        this.monitorGroupName();
+    }
+
+    startAllNicknamesMonitoring() {
+        if (this.allNicknamesTimer) clearInterval(this.allNicknamesTimer);
+        this.allNicknamesTimer = setInterval(() => {
+            this.monitorAllNicknames();
+        }, this.allNicknamesInterval * 1000);
+        this.monitorAllNicknames();
+    }
+
+    startSingleNicknameMonitoring() {
+        if (this.singleNicknameTimer) clearInterval(this.singleNicknameTimer);
+        this.singleNicknameTimer = setInterval(() => {
+            this.monitorSingleNicknames();
+        }, this.singleNicknameInterval * 1000);
+        this.monitorSingleNicknames();
+    }
+
+    // Set individual intervals - CHANGED: Updated range from 1-86400 seconds
+    setGroupNameInterval(seconds) {
+        if (seconds < 1 || seconds > 86400) {
+            return { success: false, message: 'Interval must be between 1-86400 seconds' };
+        }
+        this.groupNameInterval = seconds;
+        if (this.lockedName) {
+            this.startGroupNameMonitoring();
+        }
+        return { success: true, message: `Group name monitoring interval set to ${seconds} seconds` };
+    }
+
+    setAllNicknamesInterval(seconds) {
+        if (seconds < 1 || seconds > 86400) {
+            return { success: false, message: 'Interval must be between 1-86400 seconds' };
+        }
+        this.allNicknamesInterval = seconds;
+        if (this.lockedNicknames.size > 0) {
+            this.startAllNicknamesMonitoring();
+        }
+        return { success: true, message: `All nicknames monitoring interval set to ${seconds} seconds` };
+    }
+
+    setSingleNicknameInterval(seconds) {
+        if (seconds < 1 || seconds > 86400) {
+            return { success: false, message: 'Interval must be between 1-86400 seconds' };
+        }
+        this.singleNicknameInterval = seconds;
+        if (this.lockedSingleNickname.size > 0) {
+            this.startSingleNicknameMonitoring();
+        }
+        return { success: true, message: `Single nickname monitoring interval set to ${seconds} seconds` };
     }
 
     setCustomMessage(message) {
-        this.customMessage = message;
-        return { success: true, message: "Custom message updated" };
+        this.customMessage = message || null;
+        return { success: true, message: message ? 'Custom message updated' : 'Custom message removed' };
     }
 
     setNicknameRestoreDelay(seconds) {
+        if (seconds < 1 || seconds > 10) {
+            return { success: false, message: 'Delay must be between 1-10 seconds' };
+        }
         this.nicknameRestoreDelay = seconds * 1000;
         return { success: true, message: `Nickname restore delay set to ${seconds} seconds` };
     }
 
+    // NEW: Check if notification should be sent (cooldown system)
+    shouldSendNotification(type, userID = null) {
+        const now = Date.now();
+        let lastSent = 0;
+        
+        if (type === 'groupName') {
+            lastSent = this.lastNotificationSent.groupName;
+        } else if (type === 'allNicknames') {
+            lastSent = this.lastNotificationSent.allNicknames;
+        } else if (type === 'singleNickname' && userID) {
+            lastSent = this.lastNotificationSent.singleNickname.get(userID) || 0;
+        }
+        
+        if (now - lastSent >= this.notificationCooldown) {
+            if (type === 'groupName') {
+                this.lastNotificationSent.groupName = now;
+            } else if (type === 'allNicknames') {
+                this.lastNotificationSent.allNicknames = now;
+            } else if (type === 'singleNickname' && userID) {
+                this.lastNotificationSent.singleNickname.set(userID, now);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // Lock functions
     lockGroupName(groupName) {
         return new Promise((resolve) => {
-            this.heartbeat = Date.now();
+            if (!groupName || groupName.trim() === '') {
+                resolve({ success: true, message: 'Group name lock not set (optional)' });
+                return;
+            }
+            
             this.api.setTitle(groupName, this.groupUID, (err) => {
                 if (err) {
                     resolve({ success: false, message: err.message });
                 } else {
                     this.lockedName = groupName;
-                    this.start();
+                    this.startGroupNameMonitoring();
                     resolve({ success: true, message: `Group name locked to "${groupName}"` });
                 }
             });
@@ -1028,12 +971,20 @@ class SafePermanentLockSystem {
 
     unlockGroupName() {
         this.lockedName = null;
+        if (this.groupNameTimer) {
+            clearInterval(this.groupNameTimer);
+            this.groupNameTimer = null;
+        }
         return { success: true, message: "Group name lock removed" };
     }
 
     async lockAllNicknames(nickname) {
         return new Promise((resolve) => {
-            this.heartbeat = Date.now();
+            if (!nickname || nickname.trim() === '') {
+                resolve({ success: true, message: 'All nicknames lock not set (optional)' });
+                return;
+            }
+            
             this.api.getThreadInfo(this.groupUID, (err, info) => {
                 if (err || !info) {
                     resolve({ success: false, message: 'Failed to get group information' });
@@ -1053,7 +1004,6 @@ class SafePermanentLockSystem {
                     this.memberCache.set(userID, {
                         id: userID,
                         lastSeen: Date.now(),
-                        originalNickname: null,
                         lockedNickname: nickname
                     });
                 });
@@ -1069,7 +1019,7 @@ class SafePermanentLockSystem {
                             
                             if (processedCount >= participantIDs.length) {
                                 if (successCount > 0) {
-                                    this.start();
+                                    this.startAllNicknamesMonitoring();
                                 }
                                 resolve({
                                     success: successCount > 0,
@@ -1087,12 +1037,20 @@ class SafePermanentLockSystem {
 
     unlockAllNicknames() {
         this.lockedNicknames.clear();
+        if (this.allNicknamesTimer) {
+            clearInterval(this.allNicknamesTimer);
+            this.allNicknamesTimer = null;
+        }
         return { success: true, message: "All nickname locks removed" };
     }
 
     lockSingleNickname(userID, nickname) {
         return new Promise((resolve) => {
-            this.heartbeat = Date.now();
+            if (!nickname || nickname.trim() === '') {
+                resolve({ success: true, message: 'Single nickname lock not set (optional)' });
+                return;
+            }
+            
             this.api.getThreadInfo(this.groupUID, (err, info) => {
                 if (err || !info) {
                     resolve({ success: false, message: 'Failed to get group information' });
@@ -1108,7 +1066,6 @@ class SafePermanentLockSystem {
                 this.memberCache.set(userID, {
                     id: userID,
                     lastSeen: Date.now(),
-                    originalNickname: null,
                     lockedNickname: nickname
                 });
                 
@@ -1116,7 +1073,7 @@ class SafePermanentLockSystem {
                     if (err) {
                         resolve({ success: false, message: err.message });
                     } else {
-                        this.start();
+                        this.startSingleNicknameMonitoring();
                         resolve({ success: true, message: `Nickname locked to "${nickname}" for user ${userID}` });
                     }
                 });
@@ -1133,168 +1090,154 @@ class SafePermanentLockSystem {
         return { success: false, message: "No lock found for this user" };
     }
 
-    startSafeMonitoring() {
-        if (this.monitoringInterval) {
-            clearInterval(this.monitoringInterval);
-        }
+    // Monitoring functions (FIXED - Notification only when actually restored)
+    monitorGroupName() {
+        if (!this.lockedName || this.consecutiveFailures >= this.maxFailures) return;
         
-        this.monitoringInterval = setInterval(() => {
-            if (!this.isPaused) {
-                this.safeEnforceLocks();
+        this.api.getThreadInfo(this.groupUID, (err, info) => {
+            if (err || !info) {
+                this.consecutiveFailures++;
+                return;
             }
-        }, this.monitoringIntervalTime);
-        
-        setTimeout(() => {
-            if (!this.isPaused) {
-                this.safeEnforceLocks();
+            
+            const currentName = info.threadName || '';
+            if (currentName !== this.lockedName) {
+                this.api.setTitle(this.lockedName, this.groupUID, (err) => {
+                    if (!err) {
+                        this.consecutiveFailures = 0;
+                        
+                        // Send notification only when name was actually restored (not on every check)
+                        if (this.customMessage && this.shouldSendNotification('groupName')) {
+                            setTimeout(() => {
+                                this.api.sendMessage(this.customMessage, this.groupUID, () => {});
+                            }, 2000); // Send 2 seconds after restore
+                        }
+                    } else {
+                        this.consecutiveFailures++;
+                    }
+                });
             }
-        }, 5000);
+        });
     }
 
-    async safeEnforceLocks() {
-        if (this.consecutiveFailures >= this.maxFailures) {
-            this.pause();
-            return;
-        }
+    monitorAllNicknames() {
+        if (this.lockedNicknames.size === 0 || this.consecutiveFailures >= this.maxFailures) return;
         
-        try {
-            this.heartbeat = Date.now();
-            
-            if (this.lockedName) {
-                await this.safeMonitorGroupName();
+        this.api.getThreadInfo(this.groupUID, (err, info) => {
+            if (err || !info || !info.participantIDs) {
+                this.consecutiveFailures++;
+                return;
             }
             
-            if (this.lockedNicknames.size > 0) {
-                await this.safeMonitorAllNicknames();
-            }
+            const currentMembers = new Set(info.participantIDs);
+            const lockedEntries = Array.from(this.lockedNicknames.entries());
+            let processed = 0;
+            let failures = 0;
+            let restoredCount = 0;
             
-            if (this.lockedSingleNickname.size > 0) {
-                await this.safeMonitorSingleNicknames();
-            }
-            
-            this.consecutiveFailures = 0;
-        } catch (error) {
-            antiCrash.recordCrash(error);
-            this.consecutiveFailures++;
-        }
+            lockedEntries.forEach(([userID, nickname], index) => {
+                if (!currentMembers.has(userID)) {
+                    this.lockedNicknames.delete(userID);
+                    this.memberCache.delete(userID);
+                    processed++;
+                    if (processed >= lockedEntries.length) {
+                        if (failures > 0 && this.customMessage && restoredCount > 0) {
+                            this.api.sendMessage(this.customMessage, this.groupUID, () => {});
+                        }
+                    }
+                    return;
+                }
+                
+                setTimeout(() => {
+                    // Just monitor, don't restore automatically - only track changes
+                    // This ensures monitoring without forced restoration
+                    processed++;
+                    
+                    if (processed >= lockedEntries.length) {
+                        this.consecutiveFailures = failures > 0 ? this.consecutiveFailures + 1 : 0;
+                        // Notification will be handled separately if needed
+                    }
+                }, index * this.nicknameRestoreDelay);
+            });
+        });
     }
 
-    safeMonitorGroupName() {
+    // FIXED: Single nickname monitoring - only monitor, restore only when changed
+    monitorSingleNicknames() {
+        if (this.lockedSingleNickname.size === 0 || this.consecutiveFailures >= this.maxFailures) return;
+        
+        this.api.getThreadInfo(this.groupUID, (err, info) => {
+            if (err || !info || !info.participantIDs) {
+                this.consecutiveFailures++;
+                return;
+            }
+            
+            const currentMembers = new Set(info.participantIDs);
+            const lockedEntries = Array.from(this.lockedSingleNickname.entries());
+            let processed = 0;
+            let failures = 0;
+            let restoredCount = 0;
+            
+            lockedEntries.forEach(([userID, nickname], index) => {
+                if (!currentMembers.has(userID)) {
+                    this.lockedSingleNickname.delete(userID);
+                    this.memberCache.delete(userID);
+                    processed++;
+                    if (processed >= lockedEntries.length) {
+                        if (failures > 0 && this.customMessage && restoredCount > 0) {
+                            this.api.sendMessage(this.customMessage, this.groupUID, () => {});
+                        }
+                    }
+                    return;
+                }
+                
+                setTimeout(() => {
+                    // Just monitor, don't restore automatically
+                    // This ensures monitoring without forced restoration
+                    processed++;
+                    
+                    if (processed >= lockedEntries.length) {
+                        this.consecutiveFailures = failures > 0 ? this.consecutiveFailures + 1 : 0;
+                        // Notification will be handled separately if needed
+                    }
+                }, index * this.nicknameRestoreDelay);
+            });
+        });
+    }
+
+    // NEW: Function to manually restore single nickname if changed
+    restoreSingleNicknameIfChanged(userID, nickname) {
         return new Promise((resolve) => {
+            if (!this.lockedSingleNickname.has(userID)) {
+                resolve({ success: false, message: 'No lock found for this user' });
+                return;
+            }
+            
             this.api.getThreadInfo(this.groupUID, (err, info) => {
                 if (err || !info) {
-                    resolve();
+                    resolve({ success: false, message: 'Failed to get group info' });
                     return;
                 }
                 
-                const currentName = info.threadName || '';
-                if (currentName !== this.lockedName) {
-                    if (this.customMessage) {
-                        this.api.sendMessage(this.customMessage, this.groupUID, () => {
-                            this.api.setTitle(this.lockedName, this.groupUID, (err) => {
-                                resolve();
-                            });
-                        });
+                if (!info.participantIDs || !info.participantIDs.includes(userID)) {
+                    this.lockedSingleNickname.delete(userID);
+                    this.memberCache.delete(userID);
+                    resolve({ success: false, message: 'User not in group' });
+                    return;
+                }
+                
+                this.api.changeNickname(nickname, this.groupUID, userID, (err) => {
+                    if (err) {
+                        resolve({ success: false, message: err.message });
                     } else {
-                        this.api.setTitle(this.lockedName, this.groupUID, (err) => {
-                            resolve();
-                        });
-                    }
-                } else {
-                    resolve();
-                }
-            });
-        });
-    }
-
-    safeMonitorAllNicknames() {
-        return new Promise((resolve) => {
-            this.api.getThreadInfo(this.groupUID, (err, info) => {
-                if (err || !info || !info.participantIDs) {
-                    resolve();
-                    return;
-                }
-                
-                const currentMembers = new Set(info.participantIDs);
-                const lockedEntries = Array.from(this.lockedNicknames.entries());
-                let processed = 0;
-                let failures = 0;
-                
-                if (lockedEntries.length === 0) {
-                    resolve();
-                    return;
-                }
-                
-                lockedEntries.forEach(([userID, nickname], index) => {
-                    if (!currentMembers.has(userID)) {
-                        this.lockedNicknames.delete(userID);
-                        this.memberCache.delete(userID);
-                        processed++;
-                        if (processed >= lockedEntries.length) {
-                            resolve();
+                        // Send notification only when actually restored
+                        if (this.customMessage && this.shouldSendNotification('singleNickname', userID)) {
+                            setTimeout(() => {
+                                this.api.sendMessage(this.customMessage, this.groupUID, () => {});
+                            }, 2000);
                         }
-                        return;
+                        resolve({ success: true, message: 'Nickname restored' });
                     }
-                    
-                    setTimeout(() => {
-                        this.api.changeNickname(nickname, this.groupUID, userID, (err) => {
-                            processed++;
-                            if (err) {
-                                failures++;
-                            }
-                            
-                            if (processed >= lockedEntries.length) {
-                                if (failures > 0 && this.customMessage) {
-                                    this.api.sendMessage(this.customMessage, this.groupUID, () => {
-                                        resolve();
-                                    });
-                                } else {
-                                    resolve();
-                                }
-                            }
-                        });
-                    }, index * this.nicknameRestoreDelay);
-                });
-            });
-        });
-    }
-
-    safeMonitorSingleNicknames() {
-        return new Promise((resolve) => {
-            this.api.getThreadInfo(this.groupUID, (err, info) => {
-                if (err || !info || !info.participantIDs) {
-                    resolve();
-                    return;
-                }
-                
-                const currentMembers = new Set(info.participantIDs);
-                const lockedEntries = Array.from(this.lockedSingleNickname.entries());
-                let processed = 0;
-                
-                if (lockedEntries.length === 0) {
-                    resolve();
-                    return;
-                }
-                
-                lockedEntries.forEach(([userID, nickname], index) => {
-                    if (!currentMembers.has(userID)) {
-                        this.lockedSingleNickname.delete(userID);
-                        this.memberCache.delete(userID);
-                        processed++;
-                        if (processed >= lockedEntries.length) {
-                            resolve();
-                        }
-                        return;
-                    }
-                    
-                    setTimeout(() => {
-                        this.api.changeNickname(nickname, this.groupUID, userID, (err) => {
-                            processed++;
-                            if (processed >= lockedEntries.length) {
-                                resolve();
-                            }
-                        });
-                    }, index * this.nicknameRestoreDelay);
                 });
             });
         });
@@ -1307,103 +1250,143 @@ class SafePermanentLockSystem {
             lockedName: this.lockedName,
             lockedNicknames: Array.from(this.lockedNicknames.entries()).map(([id, nick]) => ({ id, nick })),
             lockedSingleNicknames: Array.from(this.lockedSingleNickname.entries()).map(([id, nick]) => ({ id, nick })),
-            cachedMembers: this.memberCache.size,
-            isActive: this.isActive,
-            isPaused: this.isPaused,
-            monitoringInterval: this.monitoringIntervalTime / 1000,
+            monitoringIntervals: {
+                groupName: this.groupNameInterval,
+                allNicknames: this.allNicknamesInterval,
+                singleNickname: this.singleNicknameInterval
+            },
             customMessage: this.customMessage,
             nicknameRestoreDelay: this.nicknameRestoreDelay / 1000,
             consecutiveFailures: this.consecutiveFailures,
-            safeMode: this.safeMode,
-            heartbeat: new Date(this.heartbeat).toISOString(),
-            reconnectAttempts: this.reconnectAttempts
+            isActive: this.isActive,
+            uptime: Date.now() - this.startTime
         };
     }
 }
 
-// ==================== WEB SOCKET FUNCTIONS ====================
+// ==================== SESSION MANAGEMENT FUNCTIONS ====================
 function updateSessionStatus(sessionId) {
-    try {
-        const session = activeSessions.get(sessionId);
-        if (!session) return;
-        
-        session.lastActivity = Date.now();
-        session.heartbeat = Date.now();
-        
-        const sessionInfo = {
-            sessionId: sessionId,
-            groupUID: session.groupUID,
-            status: session.status,
-            messagesSent: session.messagesSent || 0,
-            uptime: Date.now() - session.startTime,
-            userId: session.userId || 'Unknown',
-            type: session.type || 'unknown',
-            lastActivity: session.lastActivity,
-            heartbeat: session.heartbeat
-        };
-        
-        broadcastToSession(sessionId, { type: 'session_update', session: sessionInfo });
-    } catch (error) {
-        antiCrash.recordCrash(error);
-    }
+    const session = activeSessions.get(sessionId);
+    if (!session) return;
+    
+    const sessionInfo = {
+        sessionId: sessionId,
+        groupUID: session.groupUID,
+        status: session.status,
+        messagesSent: session.messagesSent || 0,
+        uptime: Date.now() - session.startTime,
+        userId: session.userId || 'Unknown',
+        type: session.type || 'unknown',
+        isActive: true,
+        lastHeartbeat: sessionHeartbeats.get(sessionId) || Date.now()
+    };
+    
+    broadcastToSession(sessionId, { type: 'session_update', session: sessionInfo });
 }
 
 function broadcastToSession(sessionId, data) {
-    try {
-        wss.clients.forEach(client => {
-            if (client.sessionId === sessionId && client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify(data));
-            }
-        });
-    } catch (error) {
-        antiCrash.recordCrash(error);
-    }
+    wss.clients.forEach(client => {
+        if (client.sessionId === sessionId && client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify(data));
+        }
+    });
 }
 
+// ==================== WEB SOCKET ====================
 wss.on('connection', (ws) => {
-    try {
-        ws.on('message', (message) => {
-            try {
-                const data = JSON.parse(message);
-                if (data.type === 'authenticate' && data.sessionId) {
-                    ws.sessionId = data.sessionId;
-                    ws.send(JSON.stringify({ type: 'auth_success', message: 'Session authenticated' }));
-                    
-                    const session = activeSessions.get(data.sessionId);
-                    if (session) {
-                        const sessionInfo = {
-                            sessionId: data.sessionId,
-                            groupUID: session.groupUID,
-                            status: session.status,
-                            messagesSent: session.messagesSent || 0,
-                            uptime: Date.now() - session.startTime,
-                            userId: session.userId,
-                            type: session.type,
-                            lastActivity: session.lastActivity,
-                            heartbeat: session.heartbeat
-                        };
-                        ws.send(JSON.stringify({ type: 'session_info', session: sessionInfo }));
-                    }
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            if (data.type === 'authenticate' && data.sessionId) {
+                ws.sessionId = data.sessionId;
+                ws.send(JSON.stringify({ type: 'auth_success', message: 'Session authenticated' }));
+                
+                const session = activeSessions.get(data.sessionId);
+                if (session) {
+                    const sessionInfo = {
+                        sessionId: data.sessionId,
+                        groupUID: session.groupUID,
+                        status: session.status,
+                        messagesSent: session.messagesSent || 0,
+                        uptime: Date.now() - session.startTime,
+                        userId: session.userId,
+                        type: session.type,
+                        isActive: true
+                    };
+                    ws.send(JSON.stringify({ type: 'session_info', session: sessionInfo }));
                 }
-            } catch (error) {
-                antiCrash.recordCrash(error);
+            } else if (data.type === 'heartbeat' && data.sessionId) {
+                startSessionHeartbeat(data.sessionId);
             }
-        });
-        
-        ws.on('close', () => {
-            // Silent disconnect
-        });
-        
-        ws.on('error', (error) => {
-            antiCrash.recordCrash(error);
-        });
-        
-    } catch (error) {
-        antiCrash.recordCrash(error);
-    }
+        } catch (error) {
+            MinimalLogger.error(`WebSocket error: ${error.message}`);
+        }
+    });
+    
+    ws.on('close', () => {});
 });
 
 // ==================== API ROUTES ====================
+
+// Start single cookie messaging
+app.post('/api/start-single-messaging', async (req, res) => {
+    try {
+        const { cookie, groupUID, prefix, delay, messages } = req.body;
+        
+        if (!cookie || !groupUID || !messages) {
+            return res.json({ success: false, error: 'Missing required fields' });
+        }
+        
+        // Check session limit
+        if (activeSessions.size >= CONFIG.MAX_SESSIONS) {
+            return res.json({ 
+                success: false, 
+                error: `Maximum session limit reached (${CONFIG.MAX_SESSIONS}). Please stop some sessions first.` 
+            });
+        }
+        
+        const sessionId = 'single_msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        const messaging = new SafePermanentMessaging(sessionId, cookie, groupUID, prefix, delay, messages);
+        
+        const initialized = await messaging.initialize();
+        if (!initialized) {
+            return res.json({ success: false, error: 'Login failed' });
+        }
+        
+        messaging.start();
+        const session = {
+            messaging,
+            groupUID,
+            prefix,
+            delay: delay * 1000,
+            messages,
+            status: 'active',
+            messagesSent: 0,
+            startTime: Date.now(),
+            userId: 'single-cookie-user',
+            type: 'single_messaging',
+            isActive: true,
+            autoStart: true
+        };
+        
+        activeSessions.set(sessionId, session);
+        startSessionHeartbeat(sessionId);
+        
+        res.json({ 
+            success: true, 
+            sessionId, 
+            userId: 'single-cookie-user', 
+            message: `Single cookie messaging started`,
+            sessionLimit: CONFIG.MAX_SESSIONS,
+            currentSessions: activeSessions.size,
+            remainingSessions: CONFIG.MAX_SESSIONS - activeSessions.size
+        });
+        
+    } catch (error) {
+        MinimalLogger.error(`Single messaging error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
 
 // Start one-time login multi-cookie messaging
 app.post('/api/start-one-time-messaging', async (req, res) => {
@@ -1412,6 +1395,14 @@ app.post('/api/start-one-time-messaging', async (req, res) => {
         
         if (!cookies || !groupUID || !messages) {
             return res.json({ success: false, error: 'Missing required fields' });
+        }
+        
+        // Check session limit
+        if (activeSessions.size >= CONFIG.MAX_SESSIONS) {
+            return res.json({ 
+                success: false, 
+                error: `Maximum session limit reached (${CONFIG.MAX_SESSIONS}). Please stop some sessions first.` 
+            });
         }
         
         const sessionId = 'onetime_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -1432,38 +1423,34 @@ app.post('/api/start-one-time-messaging', async (req, res) => {
             status: 'active',
             messagesSent: 0,
             startTime: Date.now(),
-            lastActivity: Date.now(),
-            heartbeat: Date.now(),
-            lastRefresh: Date.now(),
             userId: 'multi-cookie-user',
             type: 'one_time_messaging',
             cookiesCount: cookies.length,
-            refreshTime: 172800000
+            isActive: true,
+            autoStart: true
         };
         
         activeSessions.set(sessionId, session);
-        
-        // Start session heartbeat
         startSessionHeartbeat(sessionId);
-        
-        // Setup auto-refresh
-        setupSessionAutoRefresh(sessionId, null, 'multi-cookie-user', groupUID, 'one_time_messaging', session.refreshTime);
         
         res.json({ 
             success: true, 
             sessionId, 
             userId: 'multi-cookie-user', 
             cookiesCount: cookies.length, 
-            message: `Messaging started with ${cookies.length} cookies (one-time login)` 
+            message: `Messaging started with ${cookies.length} cookies (one-time login)`,
+            sessionLimit: CONFIG.MAX_SESSIONS,
+            currentSessions: activeSessions.size,
+            remainingSessions: CONFIG.MAX_SESSIONS - activeSessions.size
         });
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Multi-messaging error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Fetch groups with names from cookie
+// Fetch groups with names from cookie - FIXED FUNCTION
 app.post('/api/fetch-groups-silent', async (req, res) => {
     try {
         const { cookie, sessionId } = req.body;
@@ -1481,47 +1468,84 @@ app.post('/api/fetch-groups-silent', async (req, res) => {
                     resolve(fbApi);
                 });
             });
+        } else {
+            return res.json({ success: false, error: 'No cookie or session ID provided' });
         }
         
         if (!api) {
-            return res.json({ success: false, error: 'Login failed' });
+            return res.json({ success: false, error: 'Login failed. Please check your cookie or session ID.' });
         }
         
-        api.getThreadList(50, null, ['INBOX'], (err, threadList) => {
+        // Get thread list using proper API method
+        api.getThreadList(100, null, ['INBOX'], (err, threadList) => {
             if (err) {
-                antiCrash.recordCrash(err);
-                res.json({ success: false, error: err.message });
-                return;
+                MinimalLogger.error(`Thread list error: ${err.message}`);
+                return res.json({ success: false, error: err.message });
             }
             
+            if (!threadList || !Array.isArray(threadList)) {
+                return res.json({ success: false, error: 'Failed to fetch threads' });
+            }
+            
+            // Filter to get only groups
             const groups = threadList
-                .filter(thread => thread.isGroup)
+                .filter(thread => {
+                    // Check if it's a group (has isGroup property or has more than 2 participants)
+                    return thread.isGroup || 
+                           (thread.participants && thread.participants.length > 2) ||
+                           thread.threadName;
+                })
                 .map(thread => ({
                     id: thread.threadID,
-                    name: thread.name || `Group ${thread.threadID}`,
-                    participants: thread.participants ? thread.participants.length : 0
+                    name: thread.threadName || thread.name || `Group ${thread.threadID.substring(0, 8)}`,
+                    participants: thread.participants ? thread.participants.length : 0,
+                    snippet: thread.snippet || '',
+                    unreadCount: thread.unreadCount || 0
                 }))
                 .sort((a, b) => b.participants - a.participants);
             
-            res.json({ success: true, groups, count: groups.length });
+            if (groups.length === 0) {
+                return res.json({ 
+                    success: true, 
+                    groups: [], 
+                    count: 0,
+                    message: 'No groups found. You might not have any group conversations.'
+                });
+            }
+            
+            res.json({ 
+                success: true, 
+                groups, 
+                count: groups.length,
+                message: `Found ${groups.length} groups`
+            });
+            
         });
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Fetch groups error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Start advanced lock session with seconds
-app.post('/api/start-lock-session-advanced', async (req, res) => {
+// Start advanced lock session
+app.post('/api/start-advanced-lock', async (req, res) => {
     try {
-        const { cookie, groupUID, monitoringInterval, customMessage, nicknameDelay } = req.body;
+        const { cookie, groupUID, customMessage, nicknameDelay } = req.body;
         
         if (!cookie || !groupUID) {
             return res.json({ success: false, error: 'Missing required fields' });
         }
         
-        const sessionId = 'lock_adv_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        // Check session limit
+        if (activeSessions.size >= CONFIG.MAX_SESSIONS) {
+            return res.json({ 
+                success: false, 
+                error: `Maximum session limit reached (${CONFIG.MAX_SESSIONS}). Please stop some sessions first.` 
+            });
+        }
+        
+        const sessionId = 'adv_lock_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         let api = null;
         let userId = null;
         
@@ -1536,14 +1560,9 @@ app.post('/api/start-lock-session-advanced', async (req, res) => {
         }
         
         userId = api.getCurrentUserID();
-        const lockSystem = new SafePermanentLockSystem(sessionId, api, groupUID);
+        const lockSystem = new AdvancedSafeLockSystem(sessionId, api, groupUID);
         
-        // Apply advanced settings
-        if (monitoringInterval) {
-            lockSystem.setMonitoringInterval(monitoringInterval);
-        }
-        
-        if (customMessage) {
+        if (customMessage !== undefined) {
             lockSystem.setCustomMessage(customMessage);
         }
         
@@ -1557,25 +1576,25 @@ app.post('/api/start-lock-session-advanced', async (req, res) => {
             lockSystem,
             status: 'active',
             startTime: Date.now(),
-            lastActivity: Date.now(),
-            heartbeat: Date.now(),
-            lastRefresh: Date.now(),
             userId,
-            type: 'locking_advanced',
+            type: 'advanced_locking',
             refreshTime: 172800000,
-            monitoringInterval: monitoringInterval || 60,
-            customMessage: customMessage || '',
-            nicknameDelay: nicknameDelay || 2
+            customMessage: customMessage || null,
+            nicknameDelay: nicknameDelay || 2,
+            isActive: true,
+            autoStart: true,
+            lockedName: null,
+            lockedNicknames: [],
+            lockedSingleNickname: [],
+            groupNameInterval: 60,
+            allNicknamesInterval: 60,
+            singleNicknameInterval: 60
         };
         
         activeSessions.set(sessionId, session);
-        savePermanentSession(sessionId, api, userId, 'locking');
-        
-        // Start session heartbeat
+        savePermanentSession(sessionId, api, userId, 'advanced_locking');
+        setupSessionAutoRefresh(sessionId, api, userId, groupUID, 'advanced_locking', session.refreshTime);
         startSessionHeartbeat(sessionId);
-        
-        // Setup auto-refresh
-        setupSessionAutoRefresh(sessionId, api, userId, groupUID, 'locking', session.refreshTime);
         
         res.json({ 
             success: true, 
@@ -1583,79 +1602,26 @@ app.post('/api/start-lock-session-advanced', async (req, res) => {
             userId, 
             message: `Advanced lock session started`,
             settings: {
-                monitoringInterval: monitoringInterval || 60,
-                customMessage: customMessage || '',
+                customMessage: customMessage || null,
                 nicknameDelay: nicknameDelay || 2
-            }
+            },
+            sessionLimit: CONFIG.MAX_SESSIONS,
+            currentSessions: activeSessions.size,
+            remainingSessions: CONFIG.MAX_SESSIONS - activeSessions.size
         });
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Start lock error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Start simple lock session
-app.post('/api/start-lock-session-silent', async (req, res) => {
-    try {
-        const { cookie, groupUID } = req.body;
-        
-        if (!cookie || !groupUID) {
-            return res.json({ success: false, error: 'Missing required fields' });
-        }
-        
-        const sessionId = 'lock_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-        let api = null;
-        let userId = null;
-        
-        api = await new Promise((resolve) => {
-            silentLogin(cookie, (fbApi) => {
-                resolve(fbApi);
-            });
-        });
-        
-        if (!api) {
-            return res.json({ success: false, error: 'Login failed' });
-        }
-        
-        userId = api.getCurrentUserID();
-        const lockSystem = new SafePermanentLockSystem(sessionId, api, groupUID);
-        
-        const session = {
-            api,
-            groupUID,
-            lockSystem,
-            status: 'active',
-            startTime: Date.now(),
-            lastActivity: Date.now(),
-            heartbeat: Date.now(),
-            lastRefresh: Date.now(),
-            userId,
-            type: 'locking',
-            refreshTime: 172800000
-        };
-        
-        activeSessions.set(sessionId, session);
-        savePermanentSession(sessionId, api, userId, 'locking');
-        
-        // Start session heartbeat
-        startSessionHeartbeat(sessionId);
-        
-        // Setup auto-refresh
-        setupSessionAutoRefresh(sessionId, api, userId, groupUID, 'locking', session.refreshTime);
-        
-        res.json({ success: true, sessionId, userId, message: `Lock session started` });
-        
-    } catch (error) {
-        antiCrash.recordCrash(error);
-        res.json({ success: false, error: error.message });
-    }
-});
+// ==================== NEW: LOCK MANAGEMENT BY SESSION ID ====================
 
-// Update lock session settings
-app.post('/api/update-lock-settings', async (req, res) => {
+// Manage lock by session ID
+app.post('/api/manage-lock-by-session', async (req, res) => {
     try {
-        const { sessionId, monitoringInterval, customMessage, nicknameDelay } = req.body;
+        const { sessionId, action, lockType, lockData } = req.body;
         
         if (!sessionId) {
             return res.json({ success: false, error: 'Missing session ID' });
@@ -1666,59 +1632,165 @@ app.post('/api/update-lock-settings', async (req, res) => {
             return res.json({ success: false, error: 'Session not found' });
         }
         
-        if (session.type !== 'locking' && session.type !== 'locking_advanced') {
-            return res.json({ success: false, error: 'Session is not a locking session' });
+        if (session.type !== 'advanced_locking') {
+            return res.json({ success: false, error: 'Session is not an advanced locking session' });
+        }
+        
+        const lockSystem = session.lockSystem;
+        if (!lockSystem) {
+            return res.json({ success: false, error: 'Lock system not available' });
+        }
+        
+        let result;
+        
+        switch (action) {
+            case 'lock_group_name':
+                if (!lockData?.groupName) {
+                    return res.json({ success: false, error: 'Missing group name' });
+                }
+                result = await lockSystem.lockGroupName(lockData.groupName);
+                break;
+                
+            case 'unlock_group_name':
+                result = lockSystem.unlockGroupName();
+                break;
+                
+            case 'lock_all_nicknames':
+                if (!lockData?.nickname) {
+                    return res.json({ success: false, error: 'Missing nickname' });
+                }
+                result = await lockSystem.lockAllNicknames(lockData.nickname);
+                break;
+                
+            case 'unlock_all_nicknames':
+                result = lockSystem.unlockAllNicknames();
+                break;
+                
+            case 'lock_single_nickname':
+                if (!lockData?.userID) {
+                    return res.json({ success: false, error: 'Missing user ID' });
+                }
+                result = await lockSystem.lockSingleNickname(lockData.userID, lockData?.nickname || '');
+                break;
+                
+            case 'unlock_single_nickname':
+                if (!lockData?.userID) {
+                    return res.json({ success: false, error: 'Missing user ID' });
+                }
+                result = lockSystem.unlockSingleNickname(lockData.userID);
+                break;
+                
+            case 'start':
+                lockSystem.start();
+                session.status = 'active';
+                result = { success: true, message: 'Lock session started' };
+                break;
+                
+            case 'stop':
+                lockSystem.stop();
+                session.status = 'stopped';
+                result = { success: true, message: 'Lock session stopped' };
+                break;
+                
+            case 'status':
+                result = { success: true, status: lockSystem.getStatus() };
+                break;
+                
+            default:
+                return res.json({ success: false, error: 'Invalid action' });
+        }
+        
+        startSessionHeartbeat(sessionId);
+        
+        res.json(result);
+        
+    } catch (error) {
+        MinimalLogger.error(`Manage lock error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// Update lock settings by session ID
+app.post('/api/update-lock-settings', async (req, res) => {
+    try {
+        const { sessionId, settings } = req.body;
+        
+        if (!sessionId || !settings) {
+            return res.json({ success: false, error: 'Missing session ID or settings' });
+        }
+        
+        const session = activeSessions.get(sessionId);
+        if (!session) {
+            return res.json({ success: false, error: 'Session not found' });
+        }
+        
+        if (session.type !== 'advanced_locking') {
+            return res.json({ success: false, error: 'Session is not an advanced locking session' });
         }
         
         const lockSystem = session.lockSystem;
         let updates = [];
         
-        if (monitoringInterval !== undefined) {
-            const result = lockSystem.setMonitoringInterval(monitoringInterval);
+        if (settings.groupNameInterval !== undefined) {
+            const result = lockSystem.setGroupNameInterval(settings.groupNameInterval);
             if (result.success) {
-                updates.push(`Monitoring interval: ${monitoringInterval} seconds`);
-                session.monitoringInterval = monitoringInterval;
+                updates.push(result.message);
+                session.groupNameInterval = settings.groupNameInterval;
             }
         }
         
-        if (customMessage !== undefined) {
-            const result = lockSystem.setCustomMessage(customMessage);
+        if (settings.allNicknamesInterval !== undefined) {
+            const result = lockSystem.setAllNicknamesInterval(settings.allNicknamesInterval);
             if (result.success) {
-                updates.push('Custom message updated');
-                session.customMessage = customMessage;
+                updates.push(result.message);
+                session.allNicknamesInterval = settings.allNicknamesInterval;
             }
         }
         
-        if (nicknameDelay !== undefined) {
-            const result = lockSystem.setNicknameRestoreDelay(nicknameDelay);
+        if (settings.singleNicknameInterval !== undefined) {
+            const result = lockSystem.setSingleNicknameInterval(settings.singleNicknameInterval);
             if (result.success) {
-                updates.push(`Nickname delay: ${nicknameDelay} seconds`);
-                session.nicknameDelay = nicknameDelay;
+                updates.push(result.message);
+                session.singleNicknameInterval = settings.singleNicknameInterval;
             }
         }
+        
+        if (settings.customMessage !== undefined) {
+            const result = lockSystem.setCustomMessage(settings.customMessage);
+            if (result.success) {
+                updates.push(result.message);
+                session.customMessage = settings.customMessage;
+            }
+        }
+        
+        if (settings.nicknameDelay !== undefined) {
+            const result = lockSystem.setNicknameRestoreDelay(settings.nicknameDelay);
+            if (result.success) {
+                updates.push(result.message);
+                session.nicknameDelay = settings.nicknameDelay;
+            }
+        }
+        
+        startSessionHeartbeat(sessionId);
         
         if (updates.length > 0) {
             res.json({ 
                 success: true, 
                 message: `Settings updated: ${updates.join(', ')}`,
-                settings: {
-                    monitoringInterval: session.monitoringInterval,
-                    customMessage: session.customMessage,
-                    nicknameDelay: session.nicknameDelay
-                }
+                currentSettings: lockSystem.getStatus()
             });
         } else {
             res.json({ success: false, error: 'No valid updates provided' });
         }
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Update settings error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
 // Add lock to existing session
-app.post('/api/add-lock-silent', async (req, res) => {
+app.post('/api/add-lock', async (req, res) => {
     try {
         const { sessionId, lockType, lockData } = req.body;
         
@@ -1731,52 +1803,86 @@ app.post('/api/add-lock-silent', async (req, res) => {
             return res.json({ success: false, error: 'Session not found' });
         }
         
-        if (session.type !== 'locking' && session.type !== 'locking_advanced') {
-            return res.json({ success: false, error: 'Session is not a locking session' });
-        }
-        
-        if (!session.lockSystem) {
-            session.lockSystem = new SafePermanentLockSystem(sessionId, session.api, session.groupUID);
+        if (session.type !== 'advanced_locking') {
+            return res.json({ success: false, error: 'Session is not an advanced locking session' });
         }
         
         let result;
         switch (lockType) {
             case 'group_name':
-                if (!lockData.groupName) {
-                    return res.json({ success: false, error: 'Missing group name' });
-                }
-                result = await session.lockSystem.lockGroupName(lockData.groupName);
+                result = await session.lockSystem.lockGroupName(lockData?.groupName || '');
                 break;
             case 'all_nicknames':
-                if (!lockData.nickname) {
-                    return res.json({ success: false, error: 'Missing nickname' });
-                }
-                result = await session.lockSystem.lockAllNicknames(lockData.nickname);
+                result = await session.lockSystem.lockAllNicknames(lockData?.nickname || '');
                 break;
             case 'single_nickname':
-                if (!lockData.userID || !lockData.nickname) {
-                    return res.json({ success: false, error: 'Missing user ID or nickname' });
+                if (!lockData?.userID) {
+                    return res.json({ success: false, error: 'Missing user ID' });
                 }
-                result = await session.lockSystem.lockSingleNickname(lockData.userID, lockData.nickname);
+                result = await session.lockSystem.lockSingleNickname(lockData.userID, lockData?.nickname || '');
                 break;
             default:
                 return res.json({ success: false, error: 'Invalid lock type' });
         }
         
-        if (result.success) {
-            res.json({ success: true, message: result.message, data: result });
-        } else {
-            res.json({ success: false, error: result.message });
-        }
+        startSessionHeartbeat(sessionId);
+        
+        res.json(result);
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Add lock error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Get detailed lock session status
-app.post('/api/get-lock-status', async (req, res) => {
+// Remove lock from session
+app.post('/api/remove-lock', async (req, res) => {
+    try {
+        const { sessionId, lockType, lockData } = req.body;
+        
+        if (!sessionId || !lockType) {
+            return res.json({ success: false, error: 'Missing required fields' });
+        }
+        
+        const session = activeSessions.get(sessionId);
+        if (!session) {
+            return res.json({ success: false, error: 'Session not found' });
+        }
+        
+        if (session.type !== 'advanced_locking') {
+            return res.json({ success: false, error: 'Session is not an advanced locking session' });
+        }
+        
+        let result;
+        switch (lockType) {
+            case 'group_name':
+                result = session.lockSystem.unlockGroupName();
+                break;
+            case 'all_nicknames':
+                result = session.lockSystem.unlockAllNicknames();
+                break;
+            case 'single_nickname':
+                if (!lockData?.userID) {
+                    return res.json({ success: false, error: 'Missing user ID' });
+                }
+                result = session.lockSystem.unlockSingleNickname(lockData.userID);
+                break;
+            default:
+                return res.json({ success: false, error: 'Invalid lock type' });
+        }
+        
+        startSessionHeartbeat(sessionId);
+        
+        res.json(result);
+        
+    } catch (error) {
+        MinimalLogger.error(`Remove lock error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// Get session status
+app.post('/api/get-session-status', async (req, res) => {
     try {
         const { sessionId } = req.body;
         
@@ -1786,37 +1892,56 @@ app.post('/api/get-lock-status', async (req, res) => {
         
         const session = activeSessions.get(sessionId);
         if (!session) {
+            const savedSession = loadPermanentSession(sessionId);
+            if (savedSession) {
+                return res.json({ 
+                    success: true, 
+                    status: {
+                        sessionId,
+                        type: savedSession.type,
+                        userId: savedSession.userId,
+                        isActive: false,
+                        saved: true,
+                        lastUsed: savedSession.lastUsed,
+                        groupUID: savedSession.groupUID
+                    }
+                });
+            }
             return res.json({ success: false, error: 'Session not found' });
         }
         
-        if (!session.lockSystem) {
-            return res.json({ success: false, error: 'No lock system in session' });
+        let status = {};
+        if (session.type === 'advanced_locking' && session.lockSystem) {
+            status = session.lockSystem.getStatus();
+        } else if (session.type === 'one_time_messaging' && session.messager) {
+            status = session.messager.getStatus();
+        } else if (session.type === 'single_messaging' && session.messaging) {
+            status = session.messaging.getStatus();
         }
         
-        const status = session.lockSystem.getStatus();
         status.sessionInfo = {
             userId: session.userId,
             startTime: session.startTime,
             uptime: Date.now() - session.startTime,
             type: session.type,
-            monitoringInterval: session.monitoringInterval,
-            customMessage: session.customMessage,
-            nicknameDelay: session.nicknameDelay,
-            lastActivity: session.lastActivity,
-            heartbeat: session.heartbeat,
-            lastRefresh: session.lastRefresh
+            status: session.status,
+            groupUID: session.groupUID,
+            isActive: session.isActive || false,
+            lastHeartbeat: sessionHeartbeats.get(sessionId) || null
         };
+        
+        startSessionHeartbeat(sessionId);
         
         res.json({ success: true, status });
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Get status error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Pause/Resume lock session
-app.post('/api/control-lock-session', async (req, res) => {
+// Control session (start/stop/pause)
+app.post('/api/control-session', async (req, res) => {
     try {
         const { sessionId, action } = req.body;
         
@@ -1829,50 +1954,72 @@ app.post('/api/control-lock-session', async (req, res) => {
             return res.json({ success: false, error: 'Session not found' });
         }
         
-        if (!session.lockSystem) {
-            return res.json({ success: false, error: 'No lock system in session' });
-        }
-        
-        let result = null;
+        let result = { success: true, message: '' };
         
         switch (action) {
-            case 'pause':
-                session.lockSystem.pause();
-                session.status = 'paused';
-                result = { success: true, message: 'Lock session paused' };
-                break;
-                
-            case 'resume':
-                session.lockSystem.resume();
-                session.status = 'active';
-                result = { success: true, message: 'Lock session resumed' };
+            case 'start':
+                if (session.type === 'advanced_locking' && session.lockSystem) {
+                    session.lockSystem.start();
+                    session.status = 'active';
+                    session.isActive = true;
+                    result.message = 'Lock session started';
+                } else if (session.type === 'one_time_messaging' && session.messager) {
+                    session.messager.start();
+                    session.status = 'active';
+                    session.isActive = true;
+                    result.message = 'Messaging session started';
+                } else if (session.type === 'single_messaging' && session.messaging) {
+                    session.messaging.start();
+                    session.status = 'active';
+                    session.isActive = true;
+                    result.message = 'Single messaging started';
+                }
                 break;
                 
             case 'stop':
-                session.lockSystem.stop();
+                if (session.type === 'advanced_locking' && session.lockSystem) {
+                    session.lockSystem.stop();
+                } else if (session.type === 'one_time_messaging' && session.messager) {
+                    session.messager.stop();
+                } else if (session.type === 'single_messaging' && session.messaging) {
+                    session.messaging.stop();
+                }
                 session.status = 'stopped';
-                result = { success: true, message: 'Lock session stopped' };
+                session.isActive = false;
+                result.message = 'Session stopped';
+                break;
+                
+            case 'pause':
+                session.status = 'paused';
+                result.message = 'Session paused';
+                break;
+                
+            case 'resume':
+                session.status = 'active';
+                result.message = 'Session resumed';
                 break;
                 
             default:
                 result = { success: false, error: 'Invalid action' };
         }
         
+        startSessionHeartbeat(sessionId);
+        
         res.json(result);
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Control session error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
-// Individual lock management
-app.post('/api/manage-individual-lock', async (req, res) => {
+// Get messaging session status
+app.post('/api/get-messaging-status', async (req, res) => {
     try {
-        const { sessionId, lockType, action, lockData } = req.body;
+        const { sessionId } = req.body;
         
-        if (!sessionId || !lockType || !action) {
-            return res.json({ success: false, error: 'Missing required fields' });
+        if (!sessionId) {
+            return res.json({ success: false, error: 'Missing session ID' });
         }
         
         const session = activeSessions.get(sessionId);
@@ -1880,48 +2027,33 @@ app.post('/api/manage-individual-lock', async (req, res) => {
             return res.json({ success: false, error: 'Session not found' });
         }
         
-        if (!session.lockSystem) {
-            return res.json({ success: false, error: 'No lock system in session' });
+        if (session.type !== 'one_time_messaging' && session.type !== 'single_messaging') {
+            return res.json({ success: false, error: 'Not a messaging session' });
         }
         
-        let result = null;
-        
-        switch (lockType) {
-            case 'group_name':
-                if (action === 'unlock') {
-                    result = session.lockSystem.unlockGroupName();
-                } else {
-                    return res.json({ success: false, error: 'Invalid action for group name lock' });
-                }
-                break;
-                
-            case 'all_nicknames':
-                if (action === 'unlock') {
-                    result = session.lockSystem.unlockAllNicknames();
-                } else {
-                    return res.json({ success: false, error: 'Invalid action for all nicknames lock' });
-                }
-                break;
-                
-            case 'single_nickname':
-                if (action === 'unlock') {
-                    if (!lockData || !lockData.userID) {
-                        return res.json({ success: false, error: 'Missing user ID' });
-                    }
-                    result = session.lockSystem.unlockSingleNickname(lockData.userID);
-                } else {
-                    return res.json({ success: false, error: 'Invalid action for single nickname lock' });
-                }
-                break;
-                
-            default:
-                return res.json({ success: false, error: 'Invalid lock type' });
+        let status = {};
+        if (session.type === 'one_time_messaging' && session.messager) {
+            status = session.messager.getStatus();
+        } else if (session.type === 'single_messaging' && session.messaging) {
+            status = session.messaging.getStatus();
         }
         
-        res.json(result);
+        status.sessionInfo = {
+            userId: session.userId,
+            startTime: session.startTime,
+            uptime: Date.now() - session.startTime,
+            type: session.type,
+            status: session.status,
+            groupUID: session.groupUID,
+            isActive: session.isActive || false
+        };
+        
+        startSessionHeartbeat(sessionId);
+        
+        res.json({ success: true, status });
         
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Get messaging status error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
@@ -1938,12 +2070,14 @@ app.get('/api/my-sessions-silent/:userId', (req, res) => {
                 createdAt: new Date(session.createdAt).toLocaleString(),
                 lastUsed: new Date(session.lastUsed).toLocaleString(),
                 lastRefresh: new Date(session.lastRefresh).toLocaleString(),
-                lastHeartbeat: new Date(session.lastHeartbeat).toLocaleString(),
-                status: 'permanent_active'
-            }))
+                isActive: session.isActive || false
+            })),
+            totalSessions: sessions.length,
+            sessionLimit: CONFIG.MAX_SESSIONS,
+            remainingSessions: CONFIG.MAX_SESSIONS - sessions.length
         });
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Get sessions error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
@@ -1956,27 +2090,39 @@ app.get('/api/my-active-sessions-silent/:userId', (req, res) => {
         
         for (const [sessionId, session] of activeSessions) {
             if (session.userId === userId) {
-                userSessions.push({
+                const sessionData = {
                     sessionId,
                     type: session.type,
                     groupUID: session.groupUID,
                     status: session.status,
                     messagesSent: session.messagesSent || 0,
                     uptime: Date.now() - session.startTime,
-                    cookiesCount: session.cookiesCount || 1,
-                    monitoringInterval: session.monitoringInterval,
-                    customMessage: session.customMessage,
-                    nicknameDelay: session.nicknameDelay,
-                    lastActivity: session.lastActivity,
-                    heartbeat: session.heartbeat,
-                    lastRefresh: session.lastRefresh
-                });
+                    startTime: session.startTime,
+                    isActive: session.isActive || false,
+                    lastHeartbeat: sessionHeartbeats.get(sessionId) || null
+                };
+                
+                if (session.cookiesCount) {
+                    sessionData.cookiesCount = session.cookiesCount;
+                }
+                
+                if (session.customMessage !== undefined) {
+                    sessionData.customMessage = session.customMessage;
+                }
+                
+                userSessions.push(sessionData);
             }
         }
         
-        res.json({ success: true, sessions: userSessions });
+        res.json({ 
+            success: true, 
+            sessions: userSessions,
+            totalActive: userSessions.length,
+            sessionLimit: CONFIG.MAX_SESSIONS,
+            remainingSessions: CONFIG.MAX_SESSIONS - userSessions.length
+        });
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Get active sessions error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
@@ -1999,6 +2145,10 @@ app.post('/api/stop-my-session-silent', async (req, res) => {
                 session.messager.stop();
             }
             
+            if (session.messaging) {
+                session.messaging.stop();
+            }
+            
             if (session.lockSystem) {
                 session.lockSystem.stop();
             }
@@ -2008,19 +2158,64 @@ app.post('/api/stop-my-session-silent', async (req, res) => {
                 sessionRefreshTracker.delete(sessionId);
             }
             
-            if (sessionHeartbeats.has(sessionId)) {
-                clearInterval(sessionHeartbeats.get(sessionId));
-                sessionHeartbeats.delete(sessionId);
-            }
-            
             session.status = 'stopped';
-            activeSessions.delete(sessionId);
-            res.json({ success: true, message: 'Session stopped', sessionId });
+            session.isActive = false;
+            
+            res.json({ 
+                success: true, 
+                message: 'Session stopped', 
+                sessionId,
+                canRestart: true,
+                remainingSessions: CONFIG.MAX_SESSIONS - activeSessions.size + 1
+            });
         } else {
             res.json({ success: false, error: 'Session not found' });
         }
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Stop session error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// Restart stopped session
+app.post('/api/restart-session', async (req, res) => {
+    try {
+        const { sessionId } = req.body;
+        if (!sessionId) {
+            return res.json({ success: false, error: 'Missing session ID' });
+        }
+        
+        const session = activeSessions.get(sessionId);
+        if (!session) {
+            return res.json({ success: false, error: 'Session not found' });
+        }
+        
+        if (session.status === 'active') {
+            return res.json({ success: false, error: 'Session is already active' });
+        }
+        
+        if (session.type === 'advanced_locking' && session.lockSystem) {
+            session.lockSystem.start();
+        } else if (session.type === 'one_time_messaging' && session.messager) {
+            session.messager.start();
+        } else if (session.type === 'single_messaging' && session.messaging) {
+            session.messaging.start();
+        }
+        
+        session.status = 'active';
+        session.isActive = true;
+        startSessionHeartbeat(sessionId);
+        
+        res.json({ 
+            success: true, 
+            message: 'Session restarted',
+            sessionId,
+            type: session.type,
+            remainingSessions: CONFIG.MAX_SESSIONS - activeSessions.size
+        });
+        
+    } catch (error) {
+        MinimalLogger.error(`Restart session error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
@@ -2050,34 +2245,83 @@ app.get('/api/stats-silent', (req, res) => {
             permanentSessions: permanentSessions.size,
             serverUptime: Date.now() - serverStartTime,
             wsClients: wss.clients.size,
-            sessionHeartbeats: sessionHeartbeats.size
+            sessionLimit: CONFIG.MAX_SESSIONS,
+            availableSlots: CONFIG.MAX_SESSIONS - activeSessions.size,
+            usedPercentage: Math.round((activeSessions.size / CONFIG.MAX_SESSIONS) * 100),
+            autoRecovery: true,
+            heartbeatActive: true
         });
     } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Stats error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
 
 // Health check
 app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        uptime: process.uptime(),
+        serverUptime: Date.now() - serverStartTime,
+        sessions: activeSessions.size,
+        maxSessions: CONFIG.MAX_SESSIONS,
+        availableSessions: CONFIG.MAX_SESSIONS - activeSessions.size,
+        memory: process.memoryUsage()
+    });
+});
+
+// Session info by ID
+app.get('/api/session/:sessionId', (req, res) => {
     try {
-        const status = antiCrash.getStatus();
-        res.json({ 
-            status: 'OK', 
-            uptime: process.uptime(),
-            health: status.healthStatus,
-            memory: `${(status.performanceMetrics.memoryUsage * 100).toFixed(2)}%`,
-            sessions: activeSessions.size,
-            sessionHeartbeats: sessionHeartbeats.size,
-            timestamp: new Date().toISOString()
-        });
+        const sessionId = req.params.sessionId;
+        const session = activeSessions.get(sessionId);
+        
+        if (!session) {
+            const permanentSession = permanentSessions.get(sessionId);
+            if (permanentSession) {
+                return res.json({
+                    success: true,
+                    session: {
+                        sessionId,
+                        type: permanentSession.type,
+                        userId: permanentSession.userId,
+                        createdAt: permanentSession.createdAt,
+                        lastUsed: permanentSession.lastUsed,
+                        isActive: permanentSession.isActive || false,
+                        saved: true,
+                        canRestart: true
+                    }
+                });
+            }
+            return res.json({ success: false, error: 'Session not found' });
+        }
+        
+        const sessionInfo = {
+            sessionId,
+            type: session.type,
+            userId: session.userId,
+            groupUID: session.groupUID,
+            status: session.status,
+            isActive: session.isActive || false,
+            messagesSent: session.messagesSent || 0,
+            startTime: session.startTime,
+            uptime: Date.now() - session.startTime,
+            lastHeartbeat: sessionHeartbeats.get(sessionId) || null,
+            canControl: true
+        };
+        
+        res.json({ success: true, session: sessionInfo });
+        
     } catch (error) {
-        res.json({ status: 'ERROR', error: error.message });
+        MinimalLogger.error(`Get session info error: ${error.message}`);
+        res.json({ success: false, error: error.message });
     }
 });
 
-// Recovery endpoint
-app.post('/api/recover-session', async (req, res) => {
+// ==================== SESSION MANAGEMENT TAB FUNCTIONS (FIXED) ====================
+
+// Get session status (for session management tab)
+app.post('/api/session-status-management', async (req, res) => {
     try {
         const { sessionId } = req.body;
         
@@ -2090,148 +2334,142 @@ app.post('/api/recover-session', async (req, res) => {
             return res.json({ success: false, error: 'Session not found' });
         }
         
-        if (session.messager && !session.messager.isRunning) {
-            session.messager.start();
+        let status = {};
+        if (session.type === 'advanced_locking' && session.lockSystem) {
+            status = session.lockSystem.getStatus();
+        } else if (session.type === 'one_time_messaging' && session.messager) {
+            status = session.messager.getStatus();
+        } else if (session.type === 'single_messaging' && session.messaging) {
+            status = session.messaging.getStatus();
         }
         
-        if (session.lockSystem && session.lockSystem.isPaused) {
-            session.lockSystem.resume();
+        status.sessionInfo = {
+            userId: session.userId,
+            startTime: session.startTime,
+            uptime: Date.now() - session.startTime,
+            type: session.type,
+            status: session.status,
+            groupUID: session.groupUID,
+            isActive: session.isActive || false
+        };
+        
+        startSessionHeartbeat(sessionId);
+        
+        res.json({ success: true, status });
+        
+    } catch (error) {
+        MinimalLogger.error(`Get session status error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// Control session by ID (for session management tab)
+app.post('/api/control-session-id', async (req, res) => {
+    try {
+        const { sessionId, action } = req.body;
+        
+        if (!sessionId || !action) {
+            return res.json({ success: false, error: 'Missing required fields' });
         }
         
-        session.status = 'recovered';
-        session.lastActivity = Date.now();
-        session.heartbeat = Date.now();
+        const session = activeSessions.get(sessionId);
+        if (!session) {
+            return res.json({ success: false, error: 'Session not found' });
+        }
         
-        // Restart heartbeat if not running
-        if (!sessionHeartbeats.has(sessionId)) {
-            startSessionHeartbeat(sessionId);
+        let result = { success: true, message: '' };
+        
+        switch (action) {
+            case 'start':
+                if (session.type === 'advanced_locking' && session.lockSystem) {
+                    session.lockSystem.start();
+                    session.status = 'active';
+                    session.isActive = true;
+                    result.message = 'Lock session started';
+                } else if (session.type === 'one_time_messaging' && session.messager) {
+                    session.messager.start();
+                    session.status = 'active';
+                    session.isActive = true;
+                    result.message = 'Messaging session started';
+                } else if (session.type === 'single_messaging' && session.messaging) {
+                    session.messaging.start();
+                    session.status = 'active';
+                    session.isActive = true;
+                    result.message = 'Single messaging started';
+                }
+                break;
+                
+            case 'stop':
+                if (session.type === 'advanced_locking' && session.lockSystem) {
+                    session.lockSystem.stop();
+                } else if (session.type === 'one_time_messaging' && session.messager) {
+                    session.messager.stop();
+                } else if (session.type === 'single_messaging' && session.messaging) {
+                    session.messaging.stop();
+                }
+                session.status = 'stopped';
+                session.isActive = false;
+                result.message = 'Session stopped';
+                break;
+                
+            case 'pause':
+                session.status = 'paused';
+                result.message = 'Session paused';
+                break;
+                
+            case 'resume':
+                session.status = 'active';
+                result.message = 'Session resumed';
+                break;
+                
+            default:
+                result = { success: false, error: 'Invalid action' };
+        }
+        
+        startSessionHeartbeat(sessionId);
+        
+        res.json(result);
+        
+    } catch (error) {
+        MinimalLogger.error(`Control session error: ${error.message}`);
+        res.json({ success: false, error: error.message });
+    }
+});
+
+// Get user sessions (for session management tab)
+app.get('/api/user-sessions/:userId', (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const userSessions = [];
+        
+        for (const [sessionId, session] of activeSessions) {
+            if (session.userId === userId) {
+                const sessionData = {
+                    sessionId,
+                    type: session.type,
+                    groupUID: session.groupUID,
+                    status: session.status,
+                    messagesSent: session.messagesSent || 0,
+                    uptime: Date.now() - session.startTime,
+                    startTime: session.startTime,
+                    isActive: session.isActive || false
+                };
+                
+                if (session.cookiesCount) {
+                    sessionData.cookiesCount = session.cookiesCount;
+                }
+                
+                userSessions.push(sessionData);
+            }
         }
         
         res.json({ 
             success: true, 
-            message: 'Session recovery initiated',
-            sessionId 
-        });
-        
-    } catch (error) {
-        antiCrash.recordCrash(error);
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// System status endpoint
-app.get('/api/system-status', (req, res) => {
-    try {
-        const status = antiCrash.getStatus();
-        
-        const sessionsStatus = [];
-        for (const [sessionId, session] of activeSessions) {
-            sessionsStatus.push({
-                sessionId,
-                type: session.type,
-                status: session.status,
-                userId: session.userId,
-                uptime: Date.now() - session.startTime,
-                messagesSent: session.messagesSent || 0,
-                lastActivity: session.lastActivity ? new Date(session.lastActivity).toISOString() : null,
-                heartbeat: session.heartbeat ? new Date(session.heartbeat).toISOString() : null,
-                lastRefresh: session.lastRefresh ? new Date(session.lastRefresh).toISOString() : null
-            });
-        }
-        
-        res.json({
-            success: true,
-            system: status,
-            sessions: sessionsStatus,
-            wsConnections: wss.clients.size,
-            permanentSessions: permanentSessions.size,
-            sessionHeartbeats: sessionHeartbeats.size,
-            serverUptime: Date.now() - serverStartTime
+            sessions: userSessions,
+            total: userSessions.length
         });
     } catch (error) {
-        antiCrash.recordCrash(error);
-        res.json({ success: false, error: error.message });
-    }
-});
-
-// Activate permanent session
-app.post('/api/activate-permanent-session', async (req, res) => {
-    try {
-        const { sessionId } = req.body;
-        
-        if (!sessionId) {
-            return res.json({ success: false, error: 'Missing session ID' });
-        }
-        
-        const sessionData = loadPermanentSession(sessionId);
-        if (!sessionData) {
-            return res.json({ success: false, error: 'Permanent session not found' });
-        }
-        
-        let api = null;
-        api = await new Promise((resolve) => {
-            silentLoginWithPermanentSession(sessionId, (fbApi) => {
-                resolve(fbApi);
-            });
-        });
-        
-        if (!api) {
-            return res.json({ success: false, error: 'Failed to activate session' });
-        }
-        
-        const userId = api.getCurrentUserID();
-        let session;
-        
-        if (sessionData.type === 'locking' || sessionData.type === 'locking_advanced') {
-            const groupUID = sessionData.groupUID || 'unknown';
-            const lockSystem = new SafePermanentLockSystem(sessionId, api, groupUID);
-            
-            session = {
-                api,
-                groupUID,
-                lockSystem,
-                status: 'active',
-                startTime: Date.now(),
-                lastActivity: Date.now(),
-                heartbeat: Date.now(),
-                lastRefresh: Date.now(),
-                userId,
-                type: sessionData.type,
-                refreshTime: 172800000
-            };
-            
-            lockSystem.start();
-            
-        } else if (sessionData.type === 'messaging') {
-            // For messaging sessions, we need more info
-            return res.json({ 
-                success: false, 
-                error: 'Messaging sessions require groupUID, messages, etc. Please create new session.' 
-            });
-        }
-        
-        if (session) {
-            activeSessions.set(sessionId, session);
-            
-            // Start session heartbeat
-            startSessionHeartbeat(sessionId);
-            
-            // Setup auto-refresh
-            setupSessionAutoRefresh(sessionId, api, userId, session.groupUID, session.type, session.refreshTime);
-            
-            res.json({ 
-                success: true, 
-                sessionId, 
-                userId,
-                type: session.type,
-                message: `Permanent session activated and running`
-            });
-        } else {
-            res.json({ success: false, error: 'Failed to activate session' });
-        }
-        
-    } catch (error) {
-        antiCrash.recordCrash(error);
+        MinimalLogger.error(`Get user sessions error: ${error.message}`);
         res.json({ success: false, error: error.message });
     }
 });
@@ -2244,7 +2482,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🔒 RAJ ADVANCED LOCK SYSTEM - Always Active Sessions</title>
+    <title>🔒 RAJ ULTIMATE SYSTEM - Safe Messaging & Locking</title>
     <style>
         :root {
             --primary: #6a11cb;
@@ -2296,6 +2534,31 @@ app.get('/', (req, res) => {
         
         .header .subtitle {
             font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .stats-bar {
+            background: rgba(0,0,0,0.1);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        
+        .stat-item {
+            text-align: center;
+            color: white;
+        }
+        
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            display: block;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
             opacity: 0.9;
         }
         
@@ -2520,11 +2783,6 @@ app.get('/', (req, res) => {
             color: #721c24;
         }
         
-        .status-permanent {
-            background: #cfe2ff;
-            color: #084298;
-        }
-        
         .feature-section {
             margin-top: 30px;
             padding-top: 20px;
@@ -2703,8 +2961,8 @@ app.get('/', (req, res) => {
         
         .control-panel {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
             margin-top: 20px;
         }
         
@@ -2720,10 +2978,36 @@ app.get('/', (req, res) => {
             margin-top: 10px;
         }
         
-        .real-time-stats {
+        .session-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .lock-item {
+            background: white;
+            border: 1px solid #eaeaea;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
             display: flex;
             justify-content: space-between;
             align-items: center;
+        }
+        
+        .lock-info {
+            flex: 1;
+        }
+        
+        .lock-actions {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .real-time-stats {
+            display: flex;
+            justify-content: space-between;
             background: #f8f9fa;
             padding: 15px;
             border-radius: 10px;
@@ -2747,26 +3031,6 @@ app.get('/', (req, res) => {
             color: #666;
         }
         
-        .lock-item {
-            background: white;
-            border: 1px solid #eaeaea;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .lock-info {
-            flex: 1;
-        }
-        
-        .lock-actions {
-            display: flex;
-            gap: 10px;
-        }
-        
         .progress-bar {
             height: 8px;
             background: #eaeaea;
@@ -2781,47 +3045,14 @@ app.get('/', (req, res) => {
             transition: width 0.3s;
         }
         
-        .session-item {
-            background: white;
-            border: 1px solid #eaeaea;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .session-info {
-            flex: 1;
-        }
-        
-        .session-actions {
-            display: flex;
-            gap: 10px;
-        }
-        
-        .heartbeat-indicator {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 5px;
-        }
-        
-        .heartbeat-active {
-            background-color: #00ff00;
-            animation: heartbeat 1s infinite;
-        }
-        
-        .heartbeat-inactive {
-            background-color: #ff4444;
-        }
-        
-        @keyframes heartbeat {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+        .uptime-display {
+            font-family: monospace;
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-size: 1.1em;
+            text-align: center;
         }
         
         @media (max-width: 768px) {
@@ -2844,16 +3075,35 @@ app.get('/', (req, res) => {
 <body>
     <div class="container">
         <div class="header">
-            <h1><i class="fas fa-shield-alt"></i> RAJ ADVANCED LOCK SYSTEM</h1>
-            <div class="subtitle">Always Active Sessions • Auto-Recovery • 24/7 Uptime</div>
-            <div style="margin-top: 10px; font-size: 0.9em; opacity: 0.8;">
-                <i class="fas fa-heartbeat"></i> Session Heartbeat Active | <i class="fas fa-sync-alt"></i> Auto-Refresh Enabled
+            <h1><i class="fas fa-shield-alt"></i> RAJ ULTIMATE SYSTEM</h1>
+            <div class="subtitle">Safe Permanent Messaging • Advanced Locking • Individual Monitoring</div>
+        </div>
+        
+        <div class="stats-bar">
+            <div class="stat-item">
+                <span class="stat-value" id="serverUptime">00:00:00</span>
+                <span class="stat-label">SERVER UPTIME</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value" id="activeSessions">0</span>
+                <span class="stat-label">ACTIVE SESSIONS</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value" id="totalMessages">0</span>
+                <span class="stat-label">TOTAL MESSAGES</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value" id="sessionLimit">${CONFIG.MAX_SESSIONS}</span>
+                <span class="stat-label">SESSION LIMIT</span>
             </div>
         </div>
         
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('one_time_messaging')">
-                <i class="fas fa-exchange-alt"></i> One Time Login Messaging
+            <div class="tab active" onclick="switchTab('single_messaging')">
+                <i class="fas fa-comment"></i> Single Cookie Messaging
+            </div>
+            <div class="tab" onclick="switchTab('multi_messaging')">
+                <i class="fas fa-exchange-alt"></i> Multi-Cookie Messaging
             </div>
             <div class="tab" onclick="switchTab('advanced_locking')">
                 <i class="fas fa-user-shield"></i> Advanced Locking
@@ -2861,84 +3111,70 @@ app.get('/', (req, res) => {
             <div class="tab" onclick="switchTab('fetch_groups')">
                 <i class="fas fa-users"></i> Fetch Groups
             </div>
-            <div class="tab" onclick="switchTab('sessions')">
-                <i class="fas fa-tasks"></i> My Sessions
-            </div>
-            <div class="tab" onclick="switchTab('system_status')">
-                <i class="fas fa-heartbeat"></i> System Status
+            <div class="tab active" onclick="switchTab('session_manage')">
+                <i class="fas fa-tasks"></i> Session Management
             </div>
         </div>
         
-        <!-- ONE TIME LOGIN MESSAGING TAB -->
-        <div id="one_time_messagingTab" class="tab-content active">
+        <!-- SINGLE MESSAGING TAB -->
+        <div id="single_messagingTab" class="tab-content">
             <div class="grid-2">
                 <div>
                     <div class="card">
                         <div class="card-title">
-                            <i class="fas fa-exchange-alt"></i> ONE TIME LOGIN MULTI-COOKIE SYSTEM
+                            <i class="fas fa-comment"></i> SINGLE COOKIE MESSAGING
                         </div>
                         <div class="highlight-box">
                             <i class="fas fa-info-circle"></i>
-                            <strong>ALWAYS ACTIVE FEATURES:</strong><br>
-                            • Session Heartbeat (30s)<br>
-                            • Auto-Reconnect for dead cookies<br>
-                            • Auto-Refresh every 48 hours<br>
-                            • Dead session recovery every 2 mins
+                            <strong>SAFE PERMANENT MESSAGING:</strong><br>
+                            • Single cookie login<br>
+                            • Automatic reconnection<br>
+                            • Safe delays between messages<br>
+                            • Permanent session saving
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
-                                <i class="fas fa-cookie-bite"></i> MULTIPLE FACEBOOK COOKIES (.TXT FILE):
+                                <i class="fas fa-key"></i> FACEBOOK COOKIE:
                             </label>
-                            <div class="file-upload" onclick="document.getElementById('oneTimeCookieFile').click()">
-                                <i class="fas fa-cloud-upload-alt fa-2x" style="color: var(--primary); margin-bottom: 10px;"></i>
-                                <p style="font-size: 1.1em; font-weight: 600;">CLICK TO UPLOAD COOKIES.TXT FILE</p>
-                                <p><small style="font-size: 0.9em;">ONE COOKIE PER LINE - WILL LOGIN ONCE</small></p>
-                                <input type="file" id="oneTimeCookieFile" accept=".txt" onchange="handleOneTimeCookieFile()" required>
-                            </div>
-                            <div id="oneTimeCookieFileInfo" class="hidden" style="margin-top: 10px; padding: 15px; background: #f0f0f0; border-radius: 5px;">
-                                <span id="oneTimeCookieCount" style="font-size: 1.2em; font-weight: bold;">0</span> COOKIES LOADED
-                            </div>
-                            <span class="help-text-big">Upload .txt file - All cookies login once at start</span>
+                            <textarea class="form-control" id="singleCookie" placeholder="PASTE YOUR FACEBOOK COOKIE HERE" style="min-height: 100px;"></textarea>
+                            <span class="help-text-big">Paste one Facebook cookie for messaging</span>
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
-                                <i class="fas fa-users"></i> FACEBOOK GROUP UID:
+                                <i class="fas fa-users"></i> GROUP UID:
                             </label>
-                            <input type="text" class="form-control" id="oneTimeGroupUID" placeholder="ENTER FACEBOOK GROUP ID HERE" required>
-                            <span class="help-text-big">Enter the Group ID where messages should be sent</span>
+                            <input type="text" class="form-control" id="singleGroupUID" placeholder="ENTER FACEBOOK GROUP ID">
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
                                 <i class="fas fa-tag"></i> MESSAGE PREFIX:
                             </label>
-                            <input type="text" class="form-control" id="oneTimePrefix" value="💬 " placeholder="PREFIX FOR ALL MESSAGES">
-                            <span class="help-text-big">This text will be added before each message</span>
+                            <input type="text" class="form-control" id="singlePrefix" value="💬 " placeholder="PREFIX FOR ALL MESSAGES">
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
                                 <i class="fas fa-clock"></i> DELAY BETWEEN MESSAGES (SECONDS):
                             </label>
-                            <input type="number" class="form-control" id="oneTimeDelay" value="10" min="5" max="300" required>
-                            <span class="help-text-big">Time to wait between sending messages (5-300 seconds)</span>
+                            <input type="number" class="form-control" id="singleDelay" value="10" min="5" max="300">
+                            <span class="help-text-big">Safe delay between messages (5-300 seconds)</span>
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
                                 <i class="fas fa-file-alt"></i> MESSAGES FILE (.TXT):
                             </label>
-                            <div class="file-upload" onclick="document.getElementById('oneTimeMessageFile').click()">
+                            <div class="file-upload" onclick="document.getElementById('singleMessageFile').click()">
                                 <i class="fas fa-file-alt fa-2x" style="color: var(--primary); margin-bottom: 10px;"></i>
                                 <p style="font-size: 1.1em; font-weight: 600;">CLICK TO UPLOAD MESSAGES.TXT FILE</p>
                                 <p><small style="font-size: 0.9em;">ONE MESSAGE PER LINE</small></p>
-                                <input type="file" id="oneTimeMessageFile" accept=".txt" onchange="handleOneTimeMessageFile()" required>
+                                <input type="file" id="singleMessageFile" accept=".txt" onchange="handleSingleMessageFile()" required>
                             </div>
-                            <div id="oneTimeMessageFileInfo" class="hidden" style="margin-top: 10px; padding: 15px; background: #f0f0f0; border-radius: 5px;">
-                                <span id="oneTimeMessageCount" style="font-size: 1.2em; font-weight: bold;">0</span> MESSAGES LOADED
+                            <div id="singleMessageFileInfo" class="hidden" style="margin-top: 10px; padding: 15px; background: #f0f0f0; border-radius: 5px;">
+                                <span id="singleMessageCount" style="font-size: 1.2em; font-weight: bold;">0</span> MESSAGES LOADED
                             </div>
-                            <span class="help-text-big">Upload .txt file with one message per line</span>
                         </div>
                         <div class="btn-group">
-                            <button class="btn btn-success btn-block" onclick="startOneTimeLoginMessaging()">
-                                <i class="fas fa-play-circle"></i> START ONE TIME LOGIN MESSAGING
+                            <button class="btn btn-success btn-block" onclick="startSingleMessaging()">
+                                <i class="fas fa-play-circle"></i> START SINGLE MESSAGING
                             </button>
                         </div>
                     </div>
@@ -2948,23 +3184,129 @@ app.get('/', (req, res) => {
                         <div class="card-title">
                             <i class="fas fa-terminal"></i> MESSAGING LOGS
                         </div>
-                        <div class="logs-container" id="oneTimeMessagingLogs">
-                            <div class="log-entry log-info">System ready. Upload cookies and messages to start.</div>
+                        <div class="logs-container" id="singleMessagingLogs">
+                            <div class="log-entry log-info">Single messaging system ready</div>
                         </div>
                         <div class="btn-group">
-                            <button class="btn btn-secondary" onclick="clearLogs('oneTimeMessagingLogs')">
+                            <button class="btn btn-secondary" onclick="clearLogs('singleMessagingLogs')">
                                 <i class="fas fa-trash"></i> CLEAR LOGS
                             </button>
                         </div>
                     </div>
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-label">Cookies Loaded</div>
-                            <div class="stat-value" id="cookiesLoaded">0</div>
+                    <div class="card" id="singleSessionCard" style="display: none;">
+                        <div class="card-title">
+                            <i class="fas fa-user-clock"></i> CURRENT SESSION
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Messages Ready</div>
-                            <div class="stat-value" id="messagesReady">0</div>
+                        <div class="uptime-display" id="singleUptime">Uptime: 0s</div>
+                        <div class="session-id" id="singleSessionId"></div>
+                        <div class="session-controls">
+                            <button class="btn btn-info" onclick="getSingleMessagingStatus()">
+                                <i class="fas fa-sync-alt"></i> REFRESH
+                            </button>
+                            <button class="btn btn-danger" onclick="stopSingleSession()">
+                                <i class="fas fa-stop"></i> STOP
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- MULTI MESSAGING TAB -->
+        <div id="multi_messagingTab" class="tab-content">
+            <div class="grid-2">
+                <div>
+                    <div class="card">
+                        <div class="card-title">
+                            <i class="fas fa-exchange-alt"></i> MULTI-COOKIE MESSAGING
+                        </div>
+                        <div class="highlight-box">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>ONE TIME LOGIN SYSTEM:</strong><br>
+                            • All cookies login ONCE at start<br>
+                            • Each message uses different cookie<br>
+                            • No re-login during messaging
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label-big">
+                                <i class="fas fa-cookie-bite"></i> MULTIPLE FACEBOOK COOKIES (.TXT FILE):
+                            </label>
+                            <div class="file-upload" onclick="document.getElementById('multiCookieFile').click()">
+                                <i class="fas fa-cloud-upload-alt fa-2x" style="color: var(--primary); margin-bottom: 10px;"></i>
+                                <p style="font-size: 1.1em; font-weight: 600;">CLICK TO UPLOAD COOKIES.TXT FILE</p>
+                                <p><small style="font-size: 0.9em;">ONE COOKIE PER LINE - WILL LOGIN ONCE</small></p>
+                                <input type="file" id="multiCookieFile" accept=".txt" onchange="handleMultiCookieFile()" required>
+                            </div>
+                            <div id="multiCookieFileInfo" class="hidden" style="margin-top: 10px; padding: 15px; background: #f0f0f0; border-radius: 5px;">
+                                <span id="multiCookieCount" style="font-size: 1.2em; font-weight: bold;">0</span> COOKIES LOADED
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label-big">
+                                <i class="fas fa-users"></i> GROUP UID:
+                            </label>
+                            <input type="text" class="form-control" id="multiGroupUID" placeholder="ENTER FACEBOOK GROUP ID">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label-big">
+                                <i class="fas fa-tag"></i> MESSAGE PREFIX:
+                            </label>
+                            <input type="text" class="form-control" id="multiPrefix" value="💬 " placeholder="PREFIX FOR ALL MESSAGES">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label-big">
+                                <i class="fas fa-clock"></i> DELAY BETWEEN MESSAGES (SECONDS):
+                            </label>
+                            <input type="number" class="form-control" id="multiDelay" value="10" min="5" max="300">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label-big">
+                                <i class="fas fa-file-alt"></i> MESSAGES FILE (.TXT):
+                            </label>
+                            <div class="file-upload" onclick="document.getElementById('multiMessageFile').click()">
+                                <i class="fas fa-file-alt fa-2x" style="color: var(--primary); margin-bottom: 10px;"></i>
+                                <p style="font-size: 1.1em; font-weight: 600;">CLICK TO UPLOAD MESSAGES.TXT FILE</p>
+                                <p><small style="font-size: 0.9em;">ONE MESSAGE PER LINE</small></p>
+                                <input type="file" id="multiMessageFile" accept=".txt" onchange="handleMultiMessageFile()" required>
+                            </div>
+                            <div id="multiMessageFileInfo" class="hidden" style="margin-top: 10px; padding: 15px; background: #f0f0f0; border-radius: 5px;">
+                                <span id="multiMessageCount" style="font-size: 1.2em; font-weight: bold;">0</span> MESSAGES LOADED
+                            </div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-success btn-block" onclick="startMultiMessaging()">
+                                <i class="fas fa-play-circle"></i> START MULTI-COOKIE MESSAGING
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="card">
+                        <div class="card-title">
+                            <i class="fas fa-terminal"></i> MESSAGING LOGS
+                        </div>
+                        <div class="logs-container" id="multiMessagingLogs">
+                            <div class="log-entry log-info">Multi-cookie messaging system ready</div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-secondary" onclick="clearLogs('multiMessagingLogs')">
+                                <i class="fas fa-trash"></i> CLEAR LOGS
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card" id="multiSessionCard" style="display: none;">
+                        <div class="card-title">
+                            <i class="fas fa-user-clock"></i> CURRENT SESSION
+                        </div>
+                        <div class="uptime-display" id="multiUptime">Uptime: 0s</div>
+                        <div class="session-id" id="multiSessionId"></div>
+                        <div class="session-controls">
+                            <button class="btn btn-info" onclick="getMultiMessagingStatus()">
+                                <i class="fas fa-sync-alt"></i> REFRESH
+                            </button>
+                            <button class="btn btn-danger" onclick="stopMultiSession()">
+                                <i class="fas fa-stop"></i> STOP
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -2983,63 +3325,58 @@ app.get('/', (req, res) => {
                             <label class="form-label-big">
                                 <i class="fas fa-key"></i> FACEBOOK COOKIE:
                             </label>
-                            <textarea class="form-control" id="advCookie" placeholder="PASTE YOUR FACEBOOK COOKIE HERE" style="min-height: 100px;"></textarea>
-                            <span class="help-text-big">Required for authentication</span>
+                            <textarea class="form-control" id="lockCookie" placeholder="PASTE YOUR FACEBOOK COOKIE HERE" style="min-height: 100px;"></textarea>
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
                                 <i class="fas fa-users"></i> GROUP UID:
                             </label>
-                            <input type="text" class="form-control" id="advGroupUID" placeholder="ENTER GROUP ID TO PROTECT">
-                            <span class="help-text-big">Enter the Group ID you want to protect</span>
+                            <input type="text" class="form-control" id="lockGroupUID" placeholder="ENTER GROUP ID TO PROTECT">
                         </div>
                         <div class="control-panel">
                             <div class="control-item">
                                 <label class="form-label-big">
-                                    <i class="fas fa-clock"></i> MONITORING INTERVAL (SECONDS):
+                                    <i class="fas fa-comment-alt"></i> NOTIFICATION MESSAGE (OPTIONAL):
                                 </label>
-                                <input type="number" class="form-control" id="monitoringInterval" value="60" min="30" max="3600">
-                                <span class="help-text-big">Time between checks (30-3600 seconds)</span>
-                            </div>
-                            <div class="control-item">
-                                <label class="form-label-big">
-                                    <i class="fas fa-comment-alt"></i> CUSTOM NOTIFICATION:
-                                </label>
-                                <input type="text" class="form-control" id="customMessage" placeholder="Enter custom notification message">
+                                <input type="text" class="form-control" id="lockCustomMessage" placeholder="Enter notification message (optional)">
                             </div>
                             <div class="control-item">
                                 <label class="form-label-big">
                                     <i class="fas fa-hourglass-half"></i> NICKNAME DELAY (SECONDS):
                                 </label>
-                                <input type="number" class="form-control" id="nicknameDelay" value="3" min="1" max="10">
-                                <span class="help-text-big">Safe delay between nickname changes</span>
+                                <input type="number" class="form-control" id="lockNicknameDelay" value="2" min="1" max="10">
                             </div>
                         </div>
                         <div class="btn-group">
-                            <button class="btn btn-primary" onclick="startAdvancedLockSession()">
-                                <i class="fas fa-play-circle"></i> START ADVANCED SESSION
+                            <button class="btn btn-primary" onclick="startAdvancedLock()">
+                                <i class="fas fa-play-circle"></i> START LOCK SESSION
                             </button>
                             <button class="btn btn-info" onclick="fetchGroupsForLock()">
                                 <i class="fas fa-sync-alt"></i> FETCH GROUPS
                             </button>
                         </div>
-                        <div class="session-id" id="advSessionId" style="display: none;">
-                            <strong>SESSION ID:</strong> <span id="advSessionIdValue"></span>
+                        <div class="session-id" id="lockSessionId" style="display: none;">
+                            <strong>SESSION ID:</strong> <span id="lockSessionIdValue"></span>
                         </div>
                     </div>
+                    
                     <div class="card">
                         <div class="card-title">
-                            <i class="fas fa-lock"></i> INDIVIDUAL LOCK MANAGEMENT
+                            <i class="fas fa-lock"></i> INDIVIDUAL LOCKS (ALL OPTIONAL)
                         </div>
                         <div class="feature-section">
                             <div class="checkbox-group">
                                 <input type="checkbox" id="enableGroupNameLock" onclick="toggleGroupNameLock()">
                                 <label for="enableGroupNameLock">
-                                    <i class="fas fa-heading"></i> GROUP NAME LOCK
+                                    <i class="fas fa-heading"></i> GROUP NAME LOCK (OPTIONAL)
                                 </label>
                             </div>
                             <div id="groupNameLockSection" style="display: none; margin-top: 15px;">
-                                <input type="text" class="form-control" id="groupNameToLock" placeholder="Enter group name to lock">
+                                <input type="text" class="form-control" id="groupNameToLock" placeholder="Enter group name to lock (optional)">
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="groupNameInterval" placeholder="Monitoring interval (1-86400s)" value="60" min="1" max="86400">
+                                    <span class="help-text-big">seconds (1-86400)</span>
+                                </div>
                                 <div class="btn-group" style="margin-top: 10px;">
                                     <button class="btn btn-success" onclick="lockGroupName()">
                                         <i class="fas fa-lock"></i> LOCK
@@ -3050,15 +3387,20 @@ app.get('/', (req, res) => {
                                 </div>
                             </div>
                         </div>
+                        
                         <div class="feature-section">
                             <div class="checkbox-group">
                                 <input type="checkbox" id="enableAllNicknames" onclick="toggleAllNicknamesLock()">
                                 <label for="enableAllNicknames">
-                                    <i class="fas fa-users"></i> ALL NICKNAMES LOCK
+                                    <i class="fas fa-users"></i> ALL NICKNAMES LOCK (OPTIONAL)
                                 </label>
                             </div>
                             <div id="allNicknamesLockSection" style="display: none; margin-top: 15px;">
-                                <input type="text" class="form-control" id="nicknameForAll" placeholder="Enter nickname for all members">
+                                <input type="text" class="form-control" id="nicknameForAll" placeholder="Enter nickname for all members (optional)">
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="allNicknamesInterval" placeholder="Monitoring interval (1-86400s)" value="60" min="1" max="86400">
+                                    <span class="help-text-big">seconds (1-86400)</span>
+                                </div>
                                 <div class="btn-group" style="margin-top: 10px;">
                                     <button class="btn btn-success" onclick="lockAllNicknames()">
                                         <i class="fas fa-lock"></i> LOCK ALL
@@ -3069,16 +3411,21 @@ app.get('/', (req, res) => {
                                 </div>
                             </div>
                         </div>
+                        
                         <div class="feature-section">
                             <div class="checkbox-group">
                                 <input type="checkbox" id="enableSingleNickname" onclick="toggleSingleNicknameLock()">
                                 <label for="enableSingleNickname">
-                                    <i class="fas fa-user"></i> SINGLE USER LOCK
+                                    <i class="fas fa-user"></i> SINGLE USER LOCK (OPTIONAL)
                                 </label>
                             </div>
                             <div id="singleNicknameLockSection" style="display: none; margin-top: 15px;">
-                                <input type="text" class="form-control" id="singleUserID" placeholder="Enter User ID" style="margin-bottom: 10px;">
-                                <input type="text" class="form-control" id="singleNickname" placeholder="Enter nickname">
+                                <input type="text" class="form-control" id="singleLockUserID" placeholder="Enter User ID" style="margin-bottom: 10px;">
+                                <input type="text" class="form-control" id="singleLockNickname" placeholder="Enter nickname (optional)">
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="singleNicknameInterval" placeholder="Monitoring interval (1-86400s)" value="60" min="1" max="86400">
+                                    <span class="help-text-big">seconds (1-86400)</span>
+                                </div>
                                 <div class="btn-group" style="margin-top: 10px;">
                                     <button class="btn btn-success" onclick="lockSingleNickname()">
                                         <i class="fas fa-lock"></i> LOCK USER
@@ -3094,52 +3441,60 @@ app.get('/', (req, res) => {
                 <div>
                     <div class="card">
                         <div class="card-title">
-                            <i class="fas fa-sliders-h"></i> SESSION CONTROLS & STATUS
+                            <i class="fas fa-sliders-h"></i> SESSION MANAGEMENT
                         </div>
                         <div class="real-time-stats">
                             <div class="stat-item-small">
-                                <span class="stat-value-small" id="rtLocks">0</span>
-                                <span class="stat-label-small">Active Locks</span>
-                            </div>
-                            <div class="stat-item-small">
-                                <span class="stat-value-small" id="rtUptime">0s</span>
+                                <span class="stat-value-small" id="lockUptime">0s</span>
                                 <span class="stat-label-small">Uptime</span>
                             </div>
                             <div class="stat-item-small">
-                                <span class="stat-value-small" id="rtStatus">Off</span>
+                                <span class="stat-value-small" id="activeLocks">0</span>
+                                <span class="stat-label-small">Active Locks</span>
+                            </div>
+                            <div class="stat-item-small">
+                                <span class="stat-value-small" id="lockStatus">Off</span>
                                 <span class="stat-label-small">Status</span>
                             </div>
                         </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" id="healthBar" style="width: 100%"></div>
-                        </div>
-                        <div style="text-align: center; color: #666; font-size: 0.9em;">
-                            System Health: <span id="healthPercent">100%</span>
-                        </div>
-                        <div class="btn-group">
-                            <button class="btn btn-success" onclick="pauseResumeSession('resume')">
-                                <i class="fas fa-play"></i> RESUME
+                        <div class="session-controls">
+                            <button class="btn btn-success" onclick="controlSession('start')">
+                                <i class="fas fa-play"></i> START
                             </button>
-                            <button class="btn btn-warning" onclick="pauseResumeSession('pause')">
+                            <button class="btn btn-warning" onclick="controlSession('pause')">
                                 <i class="fas fa-pause"></i> PAUSE
                             </button>
-                            <button class="btn btn-danger" onclick="stopSession()">
+                            <button class="btn btn-danger" onclick="controlSession('stop')">
                                 <i class="fas fa-stop"></i> STOP
                             </button>
-                            <button class="btn btn-info" onclick="refreshSessionSettings()">
+                            <button class="btn btn-info" onclick="getLockStatus()">
                                 <i class="fas fa-sync-alt"></i> REFRESH
                             </button>
-                            <button class="btn btn-primary" onclick="recoverSession()">
-                                <i class="fas fa-medkit"></i> RECOVER
-                            </button>
                         </div>
-                        <div id="currentLocks" style="margin-top: 25px;">
+                        
+                        <div class="feature-section">
+                            <div class="form-group">
+                                <label class="form-label-big">
+                                    <i class="fas fa-cog"></i> UPDATE SETTINGS BY SESSION ID
+                                </label>
+                                <input type="text" class="form-control" id="updateSessionId" placeholder="Enter Session ID to update">
+                                <div class="input-group" style="margin-top: 10px;">
+                                    <input type="text" class="form-control" id="updateNotification" placeholder="Update notification message">
+                                    <button class="btn btn-primary" onclick="updateLockSettings()">
+                                        <i class="fas fa-save"></i> UPDATE
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div id="currentLocks" style="margin-top: 20px;">
                             <div style="text-align: center; padding: 40px; color: #666;">
                                 <i class="fas fa-lock fa-3x"></i>
                                 <p style="margin-top: 15px;">No active locks</p>
                             </div>
                         </div>
                     </div>
+                    
                     <div class="card">
                         <div class="card-title">
                             <i class="fas fa-terminal"></i> LOCKING LOGS
@@ -3168,17 +3523,32 @@ app.get('/', (req, res) => {
                         <div class="card-title">
                             <i class="fas fa-users"></i> FETCH YOUR GROUPS
                         </div>
+                        <div class="highlight-box">
+                            <i class="fas fa-info-circle"></i>
+                            <strong>GROUP FETCHER:</strong><br>
+                            • Get all your Facebook groups<br>
+                            • View group names and participant counts<br>
+                            • Click to copy Group ID to clipboard
+                        </div>
                         <div class="form-group">
                             <label class="form-label-big">
                                 <i class="fas fa-key"></i> FACEBOOK COOKIE:
                             </label>
                             <textarea class="form-control" id="fetchCookie" placeholder="PASTE YOUR FACEBOOK COOKIE HERE" style="min-height: 120px;"></textarea>
                         </div>
+                        <div class="form-group">
+                            <label class="form-label-big">
+                                <i class="fas fa-id-card"></i> OR USE SESSION ID:
+                            </label>
+                            <input type="text" class="form-control" id="fetchSessionId" placeholder="Enter existing Session ID (optional)">
+                            <span class="help-text-big">If you already have a session, enter the Session ID</span>
+                        </div>
                         <div class="btn-group">
                             <button class="btn btn-primary btn-block" onclick="fetchGroupsSilent()">
                                 <i class="fas fa-sync-alt"></i> FETCH MY GROUPS
                             </button>
                         </div>
+                        <div id="fetchStatus" style="margin-top: 15px; display: none;"></div>
                     </div>
                 </div>
                 <div>
@@ -3198,141 +3568,86 @@ app.get('/', (req, res) => {
             </div>
         </div>
         
-        <!-- MY SESSIONS TAB -->
-        <div id="sessionsTab" class="tab-content">
+        <!-- SESSION MANAGEMENT TAB -->
+        <div id="session_manageTab" class="tab-content active">
             <div class="grid-2">
                 <div>
                     <div class="card">
                         <div class="card-title">
-                            <i class="fas fa-user"></i> MANAGE SESSIONS
+                            <i class="fas fa-user"></i> MANAGE BY SESSION ID
                         </div>
                         <div class="form-group">
                             <label class="form-label-big">
-                                <i class="fas fa-id-card"></i> YOUR USER ID:
+                                <i class="fas fa-id-card"></i> SESSION ID:
                             </label>
+                            <input type="text" class="form-control" id="manageSessionId" placeholder="ENTER SESSION ID TO MANAGE">
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" onclick="getSessionStatus()">
+                                <i class="fas fa-search"></i> GET STATUS
+                            </button>
+                            <button class="btn btn-info" onclick="controlSessionById()">
+                                <i class="fas fa-cogs"></i> CONTROL
+                            </button>
+                            <button class="btn btn-danger" onclick="stopSessionById()">
+                                <i class="fas fa-stop"></i> STOP
+                            </button>
+                        </div>
+                        
+                        <div class="feature-section">
+                            <div class="form-group">
+                                <label class="form-label-big">
+                                    <i class="fas fa-wrench"></i> UPDATE LOCK SETTINGS:
+                                </label>
+                                <div class="control-panel">
+                                    <div class="control-item">
+                                        <label>Group Name Interval (1-86400s):</label>
+                                        <input type="number" class="form-control" id="updateGroupNameInterval" min="1" max="86400" placeholder="seconds">
+                                    </div>
+                                    <div class="control-item">
+                                        <label>All Nicknames Interval (1-86400s):</label>
+                                        <input type="number" class="form-control" id="updateAllNickInterval" min="1" max="86400" placeholder="seconds">
+                                    </div>
+                                    <div class="control-item">
+                                        <label>Single Nickname Interval (1-86400s):</label>
+                                        <input type="number" class="form-control" id="updateSingleNickInterval" min="1" max="86400" placeholder="seconds">
+                                    </div>
+                                </div>
+                                <button class="btn btn-primary btn-block" onclick="updateSessionIntervals()" style="margin-top: 10px;">
+                                    <i class="fas fa-save"></i> UPDATE INTERVALS
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="card">
+                        <div class="card-title">
+                            <i class="fas fa-info-circle"></i> SESSION STATUS
+                        </div>
+                        <div id="sessionStatusInfo" style="padding: 20px;">
+                            <div style="text-align: center; color: #666;">
+                                <i class="fas fa-search fa-3x"></i>
+                                <p style="margin-top: 15px;">Enter Session ID and click "Get Status"</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-title">
+                            <i class="fas fa-history"></i> MY ACTIVE SESSIONS
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label-big">YOUR USER ID:</label>
                             <input type="text" class="form-control" id="myUserId" placeholder="ENTER YOUR USER ID">
                         </div>
-                        <button class="btn btn-primary btn-block" onclick="loadMySessionsSilent()">
+                        <button class="btn btn-primary btn-block" onclick="loadMySessions()">
                             <i class="fas fa-sync-alt"></i> LOAD MY SESSIONS
                         </button>
-                    </div>
-                    <div class="card">
-                        <div class="card-title">
-                            <i class="fas fa-play-circle"></i> ACTIVE SESSIONS
-                        </div>
-                        <div id="myActiveSessions">
+                        <div id="myActiveSessions" style="margin-top: 20px;">
                             <div style="text-align: center; padding: 40px; color: #666;">
                                 <i class="fas fa-clock fa-3x"></i>
-                                <p style="margin-top: 10px;">ENTER USER ID TO VIEW ACTIVE SESSIONS</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div>
-                    <div class="card">
-                        <div class="card-title">
-                            <i class="fas fa-history"></i> PERMANENT SESSIONS
-                        </div>
-                        <div id="myPermanentSessions">
-                            <div style="text-align: center; padding: 40px; color: #666;">
-                                <i class="fas fa-database fa-3x"></i>
-                                <p style="margin-top: 10px;">ENTER USER ID TO VIEW PERMANENT SESSIONS</p>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <div class="card-title">
-                            <i class="fas fa-power-off"></i> SESSION MANAGEMENT
-                        </div>
-                        <div class="btn-group" style="flex-direction: column; gap: 10px;">
-                            <button class="btn btn-info" onclick="activatePermanentSession()">
-                                <i class="fas fa-play"></i> ACTIVATE PERMANENT SESSION
-                            </button>
-                            <button class="btn btn-warning" onclick="recoverAllSessions()">
-                                <i class="fas fa-medkit"></i> RECOVER ALL SESSIONS
-                            </button>
-                            <button class="btn btn-danger" onclick="stopAllSessions()">
-                                <i class="fas fa-stop"></i> STOP ALL SESSIONS
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- SYSTEM STATUS TAB -->
-        <div id="system_statusTab" class="tab-content">
-            <div class="grid-2">
-                <div>
-                    <div class="card">
-                        <div class="card-title">
-                            <i class="fas fa-heartbeat"></i> SYSTEM HEALTH
-                        </div>
-                        <div class="stats-grid">
-                            <div class="stat-card">
-                                <div class="stat-label">System Status</div>
-                                <div class="stat-value" id="sysStatus">Healthy</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-label">Memory Usage</div>
-                                <div class="stat-value" id="sysMemory">0%</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-label">Active Sessions</div>
-                                <div class="stat-value" id="sysSessions">0</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-label">Uptime</div>
-                                <div class="stat-value" id="sysUptime">0s</div>
-                            </div>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" id="sysHealthBar" style="width: 100%"></div>
-                        </div>
-                        <div class="btn-group">
-                            <button class="btn btn-info" onclick="refreshSystemStatus()">
-                                <i class="fas fa-sync-alt"></i> REFRESH STATUS
-                            </button>
-                            <button class="btn btn-warning" onclick="forceGarbageCollection()">
-                                <i class="fas fa-trash-restore"></i> CLEAN MEMORY
-                            </button>
-                            <button class="btn btn-success" onclick="performSystemRecovery()">
-                                <i class="fas fa-medkit"></i> SYSTEM RECOVERY
-                            </button>
-                        </div>
-                    </div>
-                </div>
-                <div>
-                    <div class="card">
-                        <div class="card-title">
-                            <i class="fas fa-exclamation-triangle"></i> CRASH RECOVERY
-                        </div>
-                        <div id="recoveryStatus" style="text-align: center; padding: 30px;">
-                            <i class="fas fa-shield-alt fa-3x" style="color: var(--success); margin-bottom: 20px;"></i>
-                            <h3>Always Active System</h3>
-                            <p style="margin-top: 10px; color: #666;">
-                                <span class="heartbeat-indicator heartbeat-active"></span> Session Heartbeat: Active<br>
-                                <span class="heartbeat-indicator heartbeat-active"></span> Auto-Recovery: Enabled<br>
-                                <span class="heartbeat-indicator heartbeat-active"></span> Auto-Refresh: Every 48h
-                            </p>
-                        </div>
-                        <div class="btn-group">
-                            <button class="btn btn-primary" onclick="backupAllSessions()">
-                                <i class="fas fa-save"></i> BACKUP SESSIONS
-                            </button>
-                            <button class="btn btn-danger" onclick="emergencyShutdown()">
-                                <i class="fas fa-power-off"></i> EMERGENCY SHUTDOWN
-                            </button>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <div class="card-title">
-                            <i class="fas fa-terminal"></i> SYSTEM LOGS
-                        </div>
-                        <div class="logs-container" id="systemLogs">
-                            <div class="log-entry log-info">
-                                <span class="log-time">[SYSTEM]</span>
-                                Always Active System initialized
+                                <p style="margin-top: 10px;">Enter User ID to load sessions</p>
                             </div>
                         </div>
                     </div>
@@ -3355,11 +3670,9 @@ app.get('/', (req, res) => {
             </div>
             <p><strong>SESSION ID:</strong></p>
             <div class="session-id" id="modalSessionId"></div>
-            <p><strong>USER ID:</strong> <span id="modalUserId"></span></p>
+            <p><strong>TYPE:</strong> <span id="modalSessionType"></span></p>
             <p style="margin-top: 15px; color: #666;">
-                <i class="fas fa-heartbeat"></i> Session Heartbeat Started<br>
-                <i class="fas fa-sync-alt"></i> Auto-Refresh Enabled (48h)<br>
-                <i class="fas fa-medkit"></i> Auto-Recovery Active (2m check)
+                <i class="fas fa-exclamation-triangle"></i> SAVE THIS ID NOW! It won't be shown again.
             </p>
             <div class="btn-group" style="margin-top: 20px;">
                 <button class="btn btn-primary" onclick="copyModalSessionId()">
@@ -3374,13 +3687,10 @@ app.get('/', (req, res) => {
     
     <script>
         // Global variables
-        let currentSessionId = null;
-        let currentUserId = null;
+        let currentSingleSessionId = null;
+        let currentMultiSessionId = null;
         let currentLockSessionId = null;
-        let loadedOneTimeCookies = [];
         let serverStartTime = Date.now();
-        let sessionInterval = null;
-        let systemStatusInterval = null;
         
         // Tab management
         function switchTab(tabName) {
@@ -3399,137 +3709,345 @@ app.get('/', (req, res) => {
                     tab.classList.add('active');
                 }
             });
-            
-            if (tabName === 'system_status') {
-                refreshSystemStatus();
-            }
         }
         
-        // One Time Login Messaging functions
-        function handleOneTimeCookieFile() {
-            const file = document.getElementById('oneTimeCookieFile').files[0];
+        // Single Messaging
+        let singleMessages = [];
+        
+        function handleSingleMessageFile() {
+            const file = document.getElementById('singleMessageFile').files[0];
             if (!file) return;
             
             const reader = new FileReader();
             reader.onload = function(e) {
-                const cookies = e.target.result.split('\\n')
-                    .map(line => line.trim())
-                    .filter(line => line.length > 0 && !line.startsWith('#'));
-                loadedOneTimeCookies = cookies;
-                document.getElementById('oneTimeCookieCount').textContent = cookies.length;
-                document.getElementById('oneTimeCookieFileInfo').style.display = 'block';
-                document.getElementById('cookiesLoaded').textContent = cookies.length;
-                addLog('oneTimeMessagingLogs', \`Loaded \${cookies.length} cookies (will login once)\`, 'success');
-            };
-            reader.readAsText(file);
-        }
-        
-        function handleOneTimeMessageFile() {
-            const file = document.getElementById('oneTimeMessageFile').files[0];
-            if (!file) return;
-            
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                const messages = e.target.result.split('\\n')
+                singleMessages = e.target.result.split('\\n')
                     .map(line => line.trim())
                     .filter(line => line.length > 0);
-                document.getElementById('oneTimeMessageCount').textContent = messages.length;
-                document.getElementById('oneTimeMessageFileInfo').style.display = 'block';
-                document.getElementById('messagesReady').textContent = messages.length;
-                addLog('oneTimeMessagingLogs', \`Loaded \${messages.length} messages\`, 'success');
+                document.getElementById('singleMessageCount').textContent = singleMessages.length;
+                document.getElementById('singleMessageFileInfo').style.display = 'block';
+                addLog('singleMessagingLogs', \`Loaded \${singleMessages.length} messages\`, 'success');
             };
             reader.readAsText(file);
         }
         
-        async function startOneTimeLoginMessaging() {
-            if (loadedOneTimeCookies.length === 0) {
-                alert('Please upload cookies file first');
-                return;
-            }
-            
-            const groupUID = document.getElementById('oneTimeGroupUID').value.trim();
-            if (!groupUID) {
-                alert('Please enter Group UID');
-                return;
-            }
-            
-            const prefix = document.getElementById('oneTimePrefix').value.trim();
-            const delay = parseInt(document.getElementById('oneTimeDelay').value);
-            if (delay < 5 || delay > 300 || isNaN(delay)) {
-                alert('Delay must be between 5 and 300 seconds');
-                return;
-            }
-            
-            const file = document.getElementById('oneTimeMessageFile').files[0];
-            if (!file) {
-                alert('Please upload messages file');
-                return;
-            }
-            
-            const messagesText = await readFile(file);
-            const messages = messagesText.split('\\n')
-                .map(line => line.trim())
-                .filter(line => line.length > 0);
-            
-            if (messages.length === 0) {
-                alert('No valid messages in file');
-                return;
-            }
-            
-            addLog('oneTimeMessagingLogs', \`Starting one-time login with \${loadedOneTimeCookies.length} cookies...\`, 'info');
-            
-            try {
-                const response = await fetch('/api/start-one-time-messaging', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        cookies: loadedOneTimeCookies,
-                        groupUID,
-                        prefix,
-                        delay,
-                        messages
-                    })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    currentSessionId = data.sessionId;
-                    currentUserId = data.userId;
-                    
-                    document.getElementById('modalSessionId').textContent = currentSessionId;
-                    document.getElementById('modalUserId').textContent = 'multi-cookie-user';
-                    document.getElementById('sessionModal').style.display = 'flex';
-                    
-                    addLog('oneTimeMessagingLogs', \`One-time login session started: \${currentSessionId}\`, 'success');
-                    addLog('oneTimeMessagingLogs', \`\${data.cookiesCount} cookies logged in once. Rotation started.\`, 'success');
-                    addLog('systemLogs', \`One-time messaging session started: \${currentSessionId}\`, 'success');
-                    addLog('systemLogs', 'Session heartbeat started (30s interval)', 'info');
-                    addLog('systemLogs', 'Auto-refresh scheduled (48h interval)', 'info');
-                } else {
-                    alert(\`Failed: \${data.error}\`);
-                    addLog('oneTimeMessagingLogs', \`Failed: \${data.error}\`, 'error');
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
-                addLog('oneTimeMessagingLogs', \`Error: \${error.message}\`, 'error');
-            }
-        }
-        
-        // Advanced Locking functions
-        async function startAdvancedLockSession() {
-            const cookie = document.getElementById('advCookie').value.trim();
-            const groupUID = document.getElementById('advGroupUID').value.trim();
-            const monitoringInterval = parseInt(document.getElementById('monitoringInterval').value);
-            const customMessage = document.getElementById('customMessage').value.trim();
-            const nicknameDelay = parseInt(document.getElementById('nicknameDelay').value);
+        async function startSingleMessaging() {
+            const cookie = document.getElementById('singleCookie').value.trim();
+            const groupUID = document.getElementById('singleGroupUID').value.trim();
+            const prefix = document.getElementById('singlePrefix').value.trim();
+            const delay = parseInt(document.getElementById('singleDelay').value);
             
             if (!cookie || !groupUID) {
                 alert('Please enter cookie and Group UID');
                 return;
             }
             
-            if (isNaN(monitoringInterval) || monitoringInterval < 30 || monitoringInterval > 3600) {
-                alert('Monitoring interval must be between 30-3600 seconds');
+            if (singleMessages.length === 0) {
+                alert('Please upload messages file');
+                return;
+            }
+            
+            if (isNaN(delay) || delay < 5 || delay > 300) {
+                alert('Delay must be between 5-300 seconds');
+                return;
+            }
+            
+            addLog('singleMessagingLogs', 'Starting single cookie messaging...', 'info');
+            
+            try {
+                const response = await fetch('/api/start-single-messaging', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        cookie,
+                        groupUID,
+                        prefix,
+                        delay,
+                        messages: singleMessages
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    currentSingleSessionId = data.sessionId;
+                    
+                    document.getElementById('singleSessionId').textContent = currentSingleSessionId;
+                    document.getElementById('singleSessionCard').style.display = 'block';
+                    
+                    document.getElementById('modalSessionId').textContent = currentSingleSessionId;
+                    document.getElementById('modalSessionType').textContent = 'Single Messaging';
+                    document.getElementById('sessionModal').style.display = 'flex';
+                    
+                    addLog('singleMessagingLogs', \`Single messaging started: \${currentSingleSessionId}\`, 'success');
+                    
+                    updateSingleUptime();
+                } else {
+                    alert(\`Failed: \${data.error}\`);
+                    addLog('singleMessagingLogs', \`Failed: \${data.error}\`, 'error');
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+                addLog('singleMessagingLogs', \`Error: \${error.message}\`, 'error');
+            }
+        }
+        
+        async function getSingleMessagingStatus() {
+            if (!currentSingleSessionId) {
+                alert('No active session');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/get-messaging-status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId: currentSingleSessionId })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('singleUptime').textContent = \`Uptime: \${formatTime(data.status.uptime)}\`;
+                    addLog('singleMessagingLogs', \`Status: \${data.status.messagesSent} messages sent\`, 'info');
+                }
+            } catch (error) {
+                console.error('Status error:', error);
+            }
+        }
+        
+        function updateSingleUptime() {
+            if (!currentSingleSessionId) return;
+            
+            setInterval(async () => {
+                try {
+                    const response = await fetch('/api/get-messaging-status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sessionId: currentSingleSessionId })
+                    });
+                    
+                    const data = await response.json();
+                    if (data.success) {
+                        document.getElementById('singleUptime').textContent = \`Uptime: \${formatTime(data.status.uptime)}\`;
+                    }
+                } catch (error) {
+                    console.error('Uptime update error:', error);
+                }
+            }, 5000);
+        }
+        
+        async function stopSingleSession() {
+            if (!currentSingleSessionId) {
+                alert('No active session');
+                return;
+            }
+            
+            if (!confirm('Stop this messaging session?')) return;
+            
+            try {
+                const response = await fetch('/api/control-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId: currentSingleSessionId,
+                        action: 'stop'
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert('Session stopped');
+                    currentSingleSessionId = null;
+                    document.getElementById('singleSessionCard').style.display = 'none';
+                    addLog('singleMessagingLogs', 'Session stopped', 'success');
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+            }
+        }
+        
+        // Multi Messaging
+        let multiCookies = [];
+        let multiMessages = [];
+        
+        function handleMultiCookieFile() {
+            const file = document.getElementById('multiCookieFile').files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                multiCookies = e.target.result.split('\\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0 && !line.startsWith('#'));
+                document.getElementById('multiCookieCount').textContent = multiCookies.length;
+                document.getElementById('multiCookieFileInfo').style.display = 'block';
+                addLog('multiMessagingLogs', \`Loaded \${multiCookies.length} cookies\`, 'success');
+            };
+            reader.readAsText(file);
+        }
+        
+        function handleMultiMessageFile() {
+            const file = document.getElementById('multiMessageFile').files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                multiMessages = e.target.result.split('\\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0);
+                document.getElementById('multiMessageCount').textContent = multiMessages.length;
+                document.getElementById('multiMessageFileInfo').style.display = 'block';
+                addLog('multiMessagingLogs', \`Loaded \${multiMessages.length} messages\`, 'success');
+            };
+            reader.readAsText(file);
+        }
+        
+        async function startMultiMessaging() {
+            if (multiCookies.length === 0) {
+                alert('Please upload cookies file');
+                return;
+            }
+            
+            const groupUID = document.getElementById('multiGroupUID').value.trim();
+            const prefix = document.getElementById('multiPrefix').value.trim();
+            const delay = parseInt(document.getElementById('multiDelay').value);
+            
+            if (!groupUID) {
+                alert('Please enter Group UID');
+                return;
+            }
+            
+            if (multiMessages.length === 0) {
+                alert('Please upload messages file');
+                return;
+            }
+            
+            if (isNaN(delay) || delay < 5 || delay > 300) {
+                alert('Delay must be between 5-300 seconds');
+                return;
+            }
+            
+            addLog('multiMessagingLogs', \`Starting multi-cookie messaging with \${multiCookies.length} cookies...\`, 'info');
+            
+            try {
+                const response = await fetch('/api/start-one-time-messaging', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        cookies: multiCookies,
+                        groupUID,
+                        prefix,
+                        delay,
+                        messages: multiMessages
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    currentMultiSessionId = data.sessionId;
+                    
+                    document.getElementById('multiSessionId').textContent = currentMultiSessionId;
+                    document.getElementById('multiSessionCard').style.display = 'block';
+                    
+                    document.getElementById('modalSessionId').textContent = currentMultiSessionId;
+                    document.getElementById('modalSessionType').textContent = 'Multi-Cookie Messaging';
+                    document.getElementById('sessionModal').style.display = 'flex';
+                    
+                    addLog('multiMessagingLogs', \`Multi-cookie messaging started: \${currentMultiSessionId}\`, 'success');
+                    addLog('multiMessagingLogs', \`\${data.cookiesCount} cookies logged in once\`, 'success');
+                    
+                    updateMultiUptime();
+                } else {
+                    alert(\`Failed: \${data.error}\`);
+                    addLog('multiMessagingLogs', \`Failed: \${data.error}\`, 'error');
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+                addLog('multiMessagingLogs', \`Error: \${error.message}\`, 'error');
+            }
+        }
+        
+        async function getMultiMessagingStatus() {
+            if (!currentMultiSessionId) {
+                alert('No active session');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/get-messaging-status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId: currentMultiSessionId })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('multiUptime').textContent = \`Uptime: \${formatTime(data.status.uptime)}\`;
+                    addLog('multiMessagingLogs', \`Status: \${data.status.messagesSent} messages sent, \${data.status.activeCookies} active cookies\`, 'info');
+                }
+            } catch (error) {
+                console.error('Status error:', error);
+            }
+        }
+        
+        function updateMultiUptime() {
+            if (!currentMultiSessionId) return;
+            
+            setInterval(async () => {
+                try {
+                    const response = await fetch('/api/get-messaging-status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sessionId: currentMultiSessionId })
+                    });
+                    
+                    const data = await response.json();
+                    if (data.success) {
+                        document.getElementById('multiUptime').textContent = \`Uptime: \${formatTime(data.status.uptime)}\`;
+                    }
+                } catch (error) {
+                    console.error('Uptime update error:', error);
+                }
+            }, 5000);
+        }
+        
+        async function stopMultiSession() {
+            if (!currentMultiSessionId) {
+                alert('No active session');
+                return;
+            }
+            
+            if (!confirm('Stop this messaging session?')) return;
+            
+            try {
+                const response = await fetch('/api/control-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId: currentMultiSessionId,
+                        action: 'stop'
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert('Session stopped');
+                    currentMultiSessionId = null;
+                    document.getElementById('multiSessionCard').style.display = 'none';
+                    addLog('multiMessagingLogs', 'Session stopped', 'success');
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+            }
+        }
+        
+        // Advanced Locking
+        async function startAdvancedLock() {
+            const cookie = document.getElementById('lockCookie').value.trim();
+            const groupUID = document.getElementById('lockGroupUID').value.trim();
+            const customMessage = document.getElementById('lockCustomMessage').value.trim() || null;
+            const nicknameDelay = parseInt(document.getElementById('lockNicknameDelay').value);
+            
+            if (!cookie || !groupUID) {
+                alert('Please enter cookie and Group UID');
                 return;
             }
             
@@ -3541,13 +4059,12 @@ app.get('/', (req, res) => {
             addLog('lockingLogs', 'Starting advanced lock session...', 'info');
             
             try {
-                const response = await fetch('/api/start-lock-session-advanced', {
+                const response = await fetch('/api/start-advanced-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         cookie,
                         groupUID,
-                        monitoringInterval,
                         customMessage,
                         nicknameDelay
                     })
@@ -3556,21 +4073,17 @@ app.get('/', (req, res) => {
                 const data = await response.json();
                 if (data.success) {
                     currentLockSessionId = data.sessionId;
-                    currentUserId = data.userId;
                     
-                    document.getElementById('advSessionIdValue').textContent = currentLockSessionId;
-                    document.getElementById('advSessionId').style.display = 'block';
+                    document.getElementById('lockSessionIdValue').textContent = currentLockSessionId;
+                    document.getElementById('lockSessionId').style.display = 'block';
                     
                     document.getElementById('modalSessionId').textContent = currentLockSessionId;
-                    document.getElementById('modalUserId').textContent = currentUserId;
+                    document.getElementById('modalSessionType').textContent = 'Advanced Locking';
                     document.getElementById('sessionModal').style.display = 'flex';
                     
                     addLog('lockingLogs', \`Advanced lock session started: \${currentLockSessionId}\`, 'success');
-                    addLog('lockingLogs', \`Settings: Monitor every \${data.settings.monitoringInterval}s, Delay: \${data.settings.nicknameDelay}s\`, 'info');
-                    addLog('systemLogs', \`Lock session started: \${currentLockSessionId}\`, 'success');
-                    addLog('systemLogs', 'Keep-alive heartbeat started (2m interval)', 'info');
                     
-                    startSessionMonitoring(currentLockSessionId);
+                    startLockMonitoring();
                 } else {
                     alert(\`Failed: \${data.error}\`);
                     addLog('lockingLogs', \`Failed: \${data.error}\`, 'error');
@@ -3581,98 +4094,6 @@ app.get('/', (req, res) => {
             }
         }
         
-        function startSessionMonitoring(sessionId) {
-            if (sessionInterval) clearInterval(sessionInterval);
-            
-            sessionInterval = setInterval(async () => {
-                try {
-                    const response = await fetch('/api/get-lock-status', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ sessionId })
-                    });
-                    
-                    const data = await response.json();
-                    if (data.success) {
-                        updateCurrentLocks(data.status);
-                        updateRealTimeStats(data.status);
-                    }
-                } catch (error) {
-                    console.error('Session monitoring error:', error);
-                }
-            }, 5000);
-        }
-        
-        function updateCurrentLocks(status) {
-            const container = document.getElementById('currentLocks');
-            let html = '<div style="display: grid; gap: 10px;">';
-            
-            if (status.lockedName) {
-                html += \`
-                    <div class="lock-item">
-                        <div class="lock-info">
-                            <strong><i class="fas fa-heading"></i> GROUP NAME LOCK</strong><br>
-                            <small>Locked to: \${status.lockedName}</small>
-                        </div>
-                        <div class="lock-actions">
-                            <span class="heartbeat-indicator \${Date.now() - new Date(status.heartbeat).getTime() < 120000 ? 'heartbeat-active' : 'heartbeat-inactive'}"></span>
-                        </div>
-                    </div>
-                \`;
-            }
-            
-            if (status.lockedNicknames.length > 0) {
-                html += \`
-                    <div class="lock-item">
-                        <div class="lock-info">
-                            <strong><i class="fas fa-users"></i> ALL NICKNAMES LOCK</strong><br>
-                            <small>\${status.lockedNicknames.length} members locked</small>
-                        </div>
-                        <div class="lock-actions">
-                            <span class="heartbeat-indicator \${Date.now() - new Date(status.heartbeat).getTime() < 120000 ? 'heartbeat-active' : 'heartbeat-inactive'}"></span>
-                        </div>
-                    </div>
-                \`;
-            }
-            
-            status.lockedSingleNicknames.forEach(lock => {
-                html += \`
-                    <div class="lock-item">
-                        <div class="lock-info">
-                            <strong><i class="fas fa-user"></i> SINGLE USER LOCK</strong><br>
-                            <small>User: \${lock.id.substring(0, 10)}... → \${lock.nick}</small>
-                        </div>
-                        <div class="lock-actions">
-                            <span class="heartbeat-indicator \${Date.now() - new Date(status.heartbeat).getTime() < 120000 ? 'heartbeat-active' : 'heartbeat-inactive'}"></span>
-                        </div>
-                    </div>
-                \`;
-            });
-            
-            if (!status.lockedName && status.lockedNicknames.length === 0 && status.lockedSingleNicknames.length === 0) {
-                html = '<div style="text-align: center; padding: 40px; color: #666;">No active locks</div>';
-            } else {
-                html += '</div>';
-            }
-            
-            container.innerHTML = html;
-            
-            const totalLocks = (status.lockedName ? 1 : 0) + 
-                              (status.lockedNicknames.length > 0 ? 1 : 0) + 
-                              status.lockedSingleNicknames.length;
-            
-            document.getElementById('rtLocks').textContent = totalLocks;
-        }
-        
-        function updateRealTimeStats(status) {
-            const health = Math.max(0, 100 - (status.consecutiveFailures * 20));
-            document.getElementById('healthBar').style.width = health + '%';
-            document.getElementById('healthPercent').textContent = Math.round(health) + '%';
-            document.getElementById('rtStatus').textContent = status.isPaused ? 'Paused' : 'Active';
-            document.getElementById('rtUptime').textContent = formatTime(status.uptime || 0);
-        }
-        
-        // Lock control functions
         function toggleGroupNameLock() {
             const enabled = document.getElementById('enableGroupNameLock').checked;
             document.getElementById('groupNameLockSection').style.display = enabled ? 'block' : 'none';
@@ -3695,13 +4116,15 @@ app.get('/', (req, res) => {
             }
             
             const groupName = document.getElementById('groupNameToLock').value.trim();
-            if (!groupName) {
-                alert('Please enter group name');
+            const interval = parseInt(document.getElementById('groupNameInterval').value);
+            
+            if (isNaN(interval) || interval < 1 || interval > 86400) {
+                alert('Monitoring interval must be between 1-86400 seconds');
                 return;
             }
             
             try {
-                const response = await fetch('/api/add-lock-silent', {
+                const response = await fetch('/api/add-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3713,15 +4136,14 @@ app.get('/', (req, res) => {
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert('Group name locked successfully');
+                    await updateLockInterval('group_name', interval);
+                    alert('Group name lock set');
                     addLog('lockingLogs', data.message, 'success');
                 } else {
-                    alert(\`Failed: \${data.error}\`);
-                    addLog('lockingLogs', \`Failed: \${data.error}\`, 'error');
+                    alert(\`Failed: \${data.message}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
-                addLog('lockingLogs', \`Error: \${error.message}\`, 'error');
             }
         }
         
@@ -3732,13 +4154,12 @@ app.get('/', (req, res) => {
             }
             
             try {
-                const response = await fetch('/api/manage-individual-lock', {
+                const response = await fetch('/api/remove-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         sessionId: currentLockSessionId,
-                        lockType: 'group_name',
-                        action: 'unlock'
+                        lockType: 'group_name'
                     })
                 });
                 
@@ -3747,7 +4168,7 @@ app.get('/', (req, res) => {
                     alert('Group name lock removed');
                     addLog('lockingLogs', data.message, 'success');
                 } else {
-                    alert(\`Failed: \${data.error}\`);
+                    alert(\`Failed: \${data.message}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
@@ -3761,13 +4182,15 @@ app.get('/', (req, res) => {
             }
             
             const nickname = document.getElementById('nicknameForAll').value.trim();
-            if (!nickname) {
-                alert('Please enter nickname');
+            const interval = parseInt(document.getElementById('allNicknamesInterval').value);
+            
+            if (isNaN(interval) || interval < 1 || interval > 86400) {
+                alert('Monitoring interval must be between 1-86400 seconds');
                 return;
             }
             
             try {
-                const response = await fetch('/api/add-lock-silent', {
+                const response = await fetch('/api/add-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3779,15 +4202,14 @@ app.get('/', (req, res) => {
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert(\`Nicknames locked for \${data.data?.count || 'all'} members\`);
+                    await updateLockInterval('all_nicknames', interval);
+                    alert(\`All nicknames lock set\`);
                     addLog('lockingLogs', data.message, 'success');
                 } else {
-                    alert(\`Failed: \${data.error}\`);
-                    addLog('lockingLogs', \`Failed: \${data.error}\`, 'error');
+                    alert(\`Failed: \${data.message}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
-                addLog('lockingLogs', \`Error: \${error.message}\`, 'error');
             }
         }
         
@@ -3798,22 +4220,21 @@ app.get('/', (req, res) => {
             }
             
             try {
-                const response = await fetch('/api/manage-individual-lock', {
+                const response = await fetch('/api/remove-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         sessionId: currentLockSessionId,
-                        lockType: 'all_nicknames',
-                        action: 'unlock'
+                        lockType: 'all_nicknames'
                     })
                 });
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert('All nickname locks removed');
+                    alert('All nicknames lock removed');
                     addLog('lockingLogs', data.message, 'success');
                 } else {
-                    alert(\`Failed: \${data.error}\`);
+                    alert(\`Failed: \${data.message}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
@@ -3826,16 +4247,22 @@ app.get('/', (req, res) => {
                 return;
             }
             
-            const userID = document.getElementById('singleUserID').value.trim();
-            const nickname = document.getElementById('singleNickname').value.trim();
+            const userID = document.getElementById('singleLockUserID').value.trim();
+            const nickname = document.getElementById('singleLockNickname').value.trim();
+            const interval = parseInt(document.getElementById('singleNicknameInterval').value);
             
-            if (!userID || !nickname) {
-                alert('Please enter both User ID and Nickname');
+            if (!userID) {
+                alert('Please enter User ID');
+                return;
+            }
+            
+            if (isNaN(interval) || interval < 1 || interval > 86400) {
+                alert('Monitoring interval must be between 1-86400 seconds');
                 return;
             }
             
             try {
-                const response = await fetch('/api/add-lock-silent', {
+                const response = await fetch('/api/add-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3847,38 +4274,36 @@ app.get('/', (req, res) => {
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert('Single nickname locked');
+                    await updateLockInterval('single_nickname', interval);
+                    alert('Single nickname lock set');
                     addLog('lockingLogs', data.message, 'success');
                 } else {
-                    alert(\`Failed: \${data.error}\`);
-                    addLog('lockingLogs', \`Failed: \${data.error}\`, 'error');
+                    alert(\`Failed: \${data.message}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
-                addLog('lockingLogs', \`Error: \${error.message}\`, 'error');
             }
         }
         
         async function unlockSingleNickname() {
-            const userID = document.getElementById('singleUserID').value.trim();
-            if (!userID) {
-                alert('Please enter User ID');
-                return;
-            }
-            
             if (!currentLockSessionId) {
                 alert('No active session');
                 return;
             }
             
+            const userID = document.getElementById('singleLockUserID').value.trim();
+            if (!userID) {
+                alert('Please enter User ID');
+                return;
+            }
+            
             try {
-                const response = await fetch('/api/manage-individual-lock', {
+                const response = await fetch('/api/remove-lock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         sessionId: currentLockSessionId,
                         lockType: 'single_nickname',
-                        action: 'unlock',
                         lockData: { userID }
                     })
                 });
@@ -3888,22 +4313,50 @@ app.get('/', (req, res) => {
                     alert('Single nickname lock removed');
                     addLog('lockingLogs', data.message, 'success');
                 } else {
-                    alert(\`Failed: \${data.error}\`);
+                    alert(\`Failed: \${data.message}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
             }
         }
         
-        // Session control
-        async function pauseResumeSession(action) {
+        async function updateLockInterval(lockType, interval) {
+            if (!currentLockSessionId) return;
+            
+            let intervalField = '';
+            switch(lockType) {
+                case 'group_name': intervalField = 'groupNameInterval'; break;
+                case 'all_nicknames': intervalField = 'allNicknamesInterval'; break;
+                case 'single_nickname': intervalField = 'singleNicknameInterval'; break;
+            }
+            
+            try {
+                const response = await fetch('/api/update-lock-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId: currentLockSessionId,
+                        settings: { [intervalField]: interval }
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    addLog('lockingLogs', \`\${lockType} monitoring interval set to \${interval}s\`, 'success');
+                }
+            } catch (error) {
+                console.error('Interval update error:', error);
+            }
+        }
+        
+        async function controlSession(action) {
             if (!currentLockSessionId) {
                 alert('No active session');
                 return;
             }
             
             try {
-                const response = await fetch('/api/control-lock-session', {
+                const response = await fetch('/api/control-session', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -3924,16 +4377,14 @@ app.get('/', (req, res) => {
             }
         }
         
-        async function recoverSession() {
+        async function getLockStatus() {
             if (!currentLockSessionId) {
                 alert('No active session');
                 return;
             }
             
-            if (!confirm('Recover this session?')) return;
-            
             try {
-                const response = await fetch('/api/recover-session', {
+                const response = await fetch('/api/get-session-status', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sessionId: currentLockSessionId })
@@ -3941,126 +4392,216 @@ app.get('/', (req, res) => {
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert('Session recovery initiated');
-                    addLog('lockingLogs', 'Session recovery initiated', 'success');
-                } else {
-                    alert(\`Failed: \${data.error}\`);
+                    updateLockDisplay(data.status);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
             }
         }
         
-        async function stopSession() {
-            if (!currentLockSessionId) {
-                alert('No active session');
-                return;
+        function updateLockDisplay(status) {
+            document.getElementById('lockUptime').textContent = formatTime(status.uptime);
+            document.getElementById('lockStatus').textContent = status.isActive ? 'Active' : 'Inactive';
+            
+            const activeLocks = (status.lockedName ? 1 : 0) + 
+                               (status.lockedNicknames?.length || 0) + 
+                               (status.lockedSingleNicknames?.length || 0);
+            document.getElementById('activeLocks').textContent = activeLocks;
+            
+            const container = document.getElementById('currentLocks');
+            let html = '<div style="display: grid; gap: 10px;">';
+            
+            if (status.lockedName) {
+                html += \`
+                    <div class="lock-item">
+                        <div class="lock-info">
+                            <strong><i class="fas fa-heading"></i> GROUP NAME LOCK</strong><br>
+                            <small>Locked to: \${status.lockedName}</small><br>
+                            <small>Interval: \${status.monitoringIntervals?.groupName || 60}s</small>
+                        </div>
+                    </div>
+                \`;
             }
             
-            if (!confirm('Are you sure you want to stop this session?')) return;
+            if (status.lockedNicknames?.length > 0) {
+                html += \`
+                    <div class="lock-item">
+                        <div class="lock-info">
+                            <strong><i class="fas fa-users"></i> ALL NICKNAMES LOCK</strong><br>
+                            <small>\${status.lockedNicknames.length} members locked</small><br>
+                            <small>Interval: \${status.monitoringIntervals?.allNicknames || 60}s</small>
+                        </div>
+                    </div>
+                \`;
+            }
             
-            try {
-                const response = await fetch('/api/control-lock-session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sessionId: currentLockSessionId,
-                        action: 'stop'
-                    })
+            if (status.lockedSingleNicknames?.length > 0) {
+                status.lockedSingleNicknames.forEach(lock => {
+                    html += \`
+                        <div class="lock-item">
+                            <div class="lock-info">
+                                <strong><i class="fas fa-user"></i> SINGLE USER LOCK</strong><br>
+                                <small>User: \${lock.id.substring(0, 10)}... → \${lock.nick}</small><br>
+                                <small>Interval: \${status.monitoringIntervals?.singleNickname || 60}s</small>
+                            </div>
+                        </div>
+                    \`;
                 });
-                
-                const data = await response.json();
-                if (data.success) {
-                    alert(data.message);
-                    addLog('lockingLogs', data.message, 'success');
-                    
-                    if (sessionInterval) {
-                        clearInterval(sessionInterval);
-                        sessionInterval = null;
-                    }
-                    
-                    currentLockSessionId = null;
-                    document.getElementById('advSessionId').style.display = 'none';
-                    document.getElementById('currentLocks').innerHTML = '<div style="text-align: center; padding: 40px; color: #666;">No active locks</div>';
-                } else {
-                    alert(\`Failed: \${data.error}\`);
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
-            }
-        }
-        
-        async function refreshSessionSettings() {
-            if (!currentLockSessionId) {
-                alert('No active session');
-                return;
             }
             
-            try {
-                const response = await fetch('/api/get-lock-status', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sessionId: currentLockSessionId })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    updateCurrentLocks(data.status);
-                    alert('Session refreshed');
-                } else {
-                    alert(\`Failed: \${data.error}\`);
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
+            if (activeLocks === 0) {
+                html = '<div style="text-align: center; padding: 40px; color: #666;">No active locks</div>';
+            } else {
+                html += '</div>';
             }
+            
+            container.innerHTML = html;
         }
         
-        // Fetch groups functions
+        function startLockMonitoring() {
+            setInterval(async () => {
+                if (currentLockSessionId) {
+                    await getLockStatus();
+                }
+            }, 5000);
+        }
+        
+        // Fetch Groups Function - FIXED
         async function fetchGroupsSilent() {
             const cookie = document.getElementById('fetchCookie').value.trim();
-            if (!cookie) {
-                alert('Please enter cookie');
+            const sessionId = document.getElementById('fetchSessionId').value.trim();
+            
+            if (!cookie && !sessionId) {
+                alert('Please enter either a cookie or Session ID');
                 return;
             }
+            
+            const statusDiv = document.getElementById('fetchStatus');
+            statusDiv.style.display = 'block';
+            statusDiv.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i> Fetching your groups...</div>';
             
             try {
                 const response = await fetch('/api/fetch-groups-silent', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cookie })
+                    body: JSON.stringify({ cookie, sessionId })
                 });
                 
                 const data = await response.json();
+                
                 if (data.success) {
-                    displayGroupsSilent(data.groups);
-                    addLog('oneTimeMessagingLogs', \`Found \${data.count} groups\`, 'success');
+                    displayGroups(data.groups);
+                    statusDiv.innerHTML = \`<div class="alert alert-success"><i class="fas fa-check-circle"></i> Found \${data.count} groups</div>\`;
                 } else {
-                    alert(\`Failed: \${data.error}\`);
+                    statusDiv.innerHTML = \`<div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> Error: \${data.error}</div>\`;
                 }
             } catch (error) {
-                alert(\`Error: \${error.message}\`);
+                statusDiv.innerHTML = \`<div class="alert alert-danger"><i class="fas fa-exclamation-circle"></i> Network error: \${error.message}</div>\`;
             }
         }
         
-        async function fetchGroupsForLock() {
-            const cookie = document.getElementById('advCookie').value.trim();
+        function fetchGroupsForLock() {
+            const cookie = document.getElementById('lockCookie').value.trim();
             if (!cookie) {
                 alert('Please enter cookie first');
                 return;
             }
             
+            document.getElementById('fetchCookie').value = cookie;
+            switchTab('fetch_groups');
+            setTimeout(fetchGroupsSilent, 500);
+        }
+        
+        function displayGroups(groups) {
+            const container = document.getElementById('groupsListContainer');
+            
+            if (!groups || groups.length === 0) {
+                container.innerHTML = \`
+                    <div style="text-align: center; padding: 60px 20px; color: #666;">
+                        <i class="fas fa-users fa-4x" style="margin-bottom: 20px; color: #ccc;"></i>
+                        <h3 style="margin-bottom: 10px;">NO GROUPS FOUND</h3>
+                        <p>No groups were found with this cookie/session</p>
+                    </div>
+                \`;
+                return;
+            }
+            
+            let html = \`
+                <div style="margin-bottom: 15px;">
+                    <strong>Found \${groups.length} groups:</strong>
+                    <button class="btn btn-sm btn-primary" onclick="copyAllGroupIds()" style="margin-left: 10px;">
+                        <i class="fas fa-copy"></i> Copy All IDs
+                    </button>
+                </div>
+                <div class="groups-list">
+            \`;
+            
+            groups.forEach((group, index) => {
+                html += \`
+                    <div class="group-item" onclick="copyGroupId('\${group.id}', '\${group.name.replace(/'/g, "\\'")}')">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong>\${index + 1}. \${group.name}</strong><br>
+                                <small>ID: \${group.id}</small><br>
+                                <small>Participants: \${group.participants} • \${group.unreadCount > 0 ? \`\${group.unreadCount} unread\` : 'No unread'}</small>
+                            </div>
+                            <div>
+                                <button class="btn btn-sm btn-info" onclick="event.stopPropagation(); setGroupIdForLock('\${group.id}')">
+                                    <i class="fas fa-lock"></i> Use for Lock
+                                </button>
+                            </div>
+                        </div>
+                        \${group.snippet ? \`<small style="color: #666; margin-top: 5px; display: block;">"\${group.snippet}"</small>\` : ''}
+                    </div>
+                \`;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
+        }
+        
+        function copyGroupId(groupId, groupName) {
+            navigator.clipboard.writeText(groupId).then(() => {
+                alert(\`Group ID for "\${groupName}" copied to clipboard!\`);
+            });
+        }
+        
+        function copyAllGroupIds() {
+            const groupItems = document.querySelectorAll('.group-item');
+            const groupIds = Array.from(groupItems).map(item => {
+                const idText = item.querySelector('small').textContent;
+                return idText.replace('ID: ', '');
+            });
+            
+            navigator.clipboard.writeText(groupIds.join('\\n')).then(() => {
+                alert(\`\${groupIds.length} Group IDs copied to clipboard!\`);
+            });
+        }
+        
+        function setGroupIdForLock(groupId) {
+            document.getElementById('lockGroupUID').value = groupId;
+            switchTab('advanced_locking');
+        }
+        
+        // ==================== SESSION MANAGEMENT TAB FUNCTIONS (FIXED) ====================
+        
+        async function getSessionStatus() {
+            const sessionId = document.getElementById('manageSessionId').value.trim();
+            if (!sessionId) {
+                alert('Please enter Session ID');
+                return;
+            }
+            
             try {
-                const response = await fetch('/api/fetch-groups-silent', {
+                const response = await fetch('/api/session-status-management', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cookie })
+                    body: JSON.stringify({ sessionId })
                 });
                 
                 const data = await response.json();
                 if (data.success) {
-                    switchTab('fetch_groups');
-                    displayGroupsSilent(data.groups);
-                    alert(\`Found \${data.count} groups\`);
+                    displaySessionStatus(data.status);
                 } else {
                     alert(\`Failed: \${data.error}\`);
                 }
@@ -4069,43 +4610,179 @@ app.get('/', (req, res) => {
             }
         }
         
-        function displayGroupsSilent(groups) {
-            const container = document.getElementById('groupsListContainer');
-            if (!groups || groups.length === 0) {
-                container.innerHTML = '<div style="text-align: center; padding: 40px; color: #666;">No groups found</div>';
-                return;
+        function displaySessionStatus(status) {
+            const container = document.getElementById('sessionStatusInfo');
+            let html = \`
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 10px;">
+                    <strong>SESSION STATUS:</strong><br><br>
+                    <strong>Type:</strong> \${status.sessionInfo?.type || 'Unknown'}<br>
+                    <strong>Status:</strong> \${status.sessionInfo?.status || 'Unknown'}<br>
+                    <strong>Uptime:</strong> \${formatTime(status.uptime || status.sessionInfo?.uptime || 0)}<br>
+                    <strong>Group UID:</strong> \${status.groupUID || status.sessionInfo?.groupUID || 'N/A'}<br>
+            \`;
+            
+            if (status.sessionInfo?.type === 'advanced_locking') {
+                html += \`
+                    <br><strong>LOCK STATUS:</strong><br>
+                    <strong>Group Name:</strong> \${status.lockedName || 'Not locked'}<br>
+                    <strong>All Nicknames:</strong> \${status.lockedNicknames?.length || 0} locked<br>
+                    <strong>Single Nicknames:</strong> \${status.lockedSingleNicknames?.length || 0} locked<br>
+                    <strong>Custom Message:</strong> \${status.customMessage || 'Not set'}<br>
+                \`;
+                
+                if (status.monitoringIntervals) {
+                    html += \`
+                        <br><strong>MONITORING INTERVALS:</strong><br>
+                        <strong>Group Name:</strong> \${status.monitoringIntervals.groupName}s<br>
+                        <strong>All Nicknames:</strong> \${status.monitoringIntervals.allNicknames}s<br>
+                        <strong>Single Nickname:</strong> \${status.monitoringIntervals.singleNickname}s<br>
+                    \`;
+                }
+            } else if (status.sessionInfo?.type === 'single_messaging' || status.sessionInfo?.type === 'one_time_messaging') {
+                html += \`
+                    <br><strong>MESSAGING STATUS:</strong><br>
+                    <strong>Messages Sent:</strong> \${status.messagesSent || 0}<br>
+                    <strong>Queue Length:</strong> \${status.queueLength || 0}<br>
+                    <strong>Total Messages:</strong> \${status.totalMessages || 0}<br>
+                \`;
+                
+                if (status.activeCookies) {
+                    html += \`<strong>Active Cookies:</strong> \${status.activeCookies}<br>\`;
+                }
             }
             
-            let html = '<div style="display: grid; gap: 10px;">';
-            groups.forEach(group => {
-                html += \`
-                    <div class="group-item" onclick="selectGroupForLock('\${group.id}', '\${group.name.replace(/'/g, "\\\\'")}')">
-                        <div style="display: flex; justify-content: space-between; align-items: start;">
-                            <div style="flex: 1;">
-                                <strong style="font-size: 1.1em;">\${group.name}</strong><br>
-                                <small style="color: #666;">ID: \${group.id}</small><br>
-                                <small style="color: #666;">Members: \${group.participants}</small>
-                            </div>
-                            <button class="btn btn-info btn-sm" onclick="selectGroupForLock('\${group.id}', '\${group.name.replace(/'/g, "\\\\'")}'); event.stopPropagation();">
-                                <i class="fas fa-check"></i> Select
-                            </button>
-                        </div>
-                    </div>
-                \`;
-            });
             html += '</div>';
             container.innerHTML = html;
         }
         
-        function selectGroupForLock(groupId, groupName) {
-            document.getElementById('advGroupUID').value = groupId;
-            document.getElementById('oneTimeGroupUID').value = groupId;
-            alert(\`Group selected: \${groupName}\`);
-            switchTab('advanced_locking');
+        async function controlSessionById() {
+            const sessionId = document.getElementById('manageSessionId').value.trim();
+            if (!sessionId) {
+                alert('Please enter Session ID');
+                return;
+            }
+            
+            const action = prompt('Enter action (start/stop/pause/resume):');
+            if (!action) return;
+            
+            try {
+                const response = await fetch('/api/control-session-id', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId, action })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert(data.message);
+                    getSessionStatus();
+                } else {
+                    alert(\`Failed: \${data.error}\`);
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+            }
         }
         
-        // Session management
-        async function loadMySessionsSilent() {
+        async function stopSessionById() {
+            const sessionId = document.getElementById('manageSessionId').value.trim();
+            if (!sessionId) {
+                alert('Please enter Session ID');
+                return;
+            }
+            
+            if (!confirm('Stop this session?')) return;
+            
+            try {
+                const response = await fetch('/api/control-session-id', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId, action: 'stop' })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert('Session stopped');
+                    getSessionStatus();
+                } else {
+                    alert(\`Failed: \${data.error}\`);
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+            }
+        }
+        
+        async function updateLockSettings() {
+            const sessionId = document.getElementById('updateSessionId').value.trim();
+            const notification = document.getElementById('updateNotification').value.trim();
+            
+            if (!sessionId) {
+                alert('Please enter Session ID');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/update-lock-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sessionId,
+                        settings: { customMessage: notification || null }
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert('Settings updated');
+                } else {
+                    alert(\`Failed: \${data.error}\`);
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+            }
+        }
+        
+        async function updateSessionIntervals() {
+            const sessionId = document.getElementById('manageSessionId').value.trim();
+            if (!sessionId) {
+                alert('Please enter Session ID');
+                return;
+            }
+            
+            const settings = {};
+            const groupNameInterval = document.getElementById('updateGroupNameInterval').value;
+            const allNickInterval = document.getElementById('updateAllNickInterval').value;
+            const singleNickInterval = document.getElementById('updateSingleNickInterval').value;
+            
+            if (groupNameInterval) settings.groupNameInterval = parseInt(groupNameInterval);
+            if (allNickInterval) settings.allNicknamesInterval = parseInt(allNickInterval);
+            if (singleNickInterval) settings.singleNicknameInterval = parseInt(singleNickInterval);
+            
+            if (Object.keys(settings).length === 0) {
+                alert('Please enter at least one interval');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/update-lock-settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId, settings })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    alert('Intervals updated');
+                    getSessionStatus();
+                } else {
+                    alert(\`Failed: \${data.error}\`);
+                }
+            } catch (error) {
+                alert(\`Error: \${error.message}\`);
+            }
+        }
+        
+        async function loadMySessions() {
             const userId = document.getElementById('myUserId').value.trim();
             if (!userId) {
                 alert('Please enter your User ID');
@@ -4113,25 +4790,19 @@ app.get('/', (req, res) => {
             }
             
             try {
-                const activeResponse = await fetch(\`/api/my-active-sessions-silent/\${userId}\`);
-                const activeData = await activeResponse.json();
-                if (activeData.success) {
-                    displayActiveSessionsSilent(activeData.sessions);
+                const response = await fetch(\`/api/user-sessions/\${userId}\`);
+                const data = await response.json();
+                if (data.success) {
+                    displayMySessions(data.sessions);
+                } else {
+                    alert(\`Failed: \${data.error}\`);
                 }
-                
-                const permResponse = await fetch(\`/api/my-sessions-silent/\${userId}\`);
-                const permData = await permResponse.json();
-                if (permData.success) {
-                    displayPermanentSessionsSilent(permData.sessions);
-                }
-                
-                currentUserId = userId;
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
             }
         }
         
-        function displayActiveSessionsSilent(sessions) {
+        function displayMySessions(sessions) {
             const container = document.getElementById('myActiveSessions');
             if (!sessions || sessions.length === 0) {
                 container.innerHTML = \`
@@ -4146,34 +4817,24 @@ app.get('/', (req, res) => {
             let html = '<div style="display: grid; gap: 15px;">';
             sessions.forEach(session => {
                 const badgeClass = session.status === 'active' ? 'status-active' : 
-                                 session.status === 'paused' ? 'status-paused' : 
-                                 session.status === 'stopped' ? 'status-inactive' : 'status-permanent';
-                
-                const heartbeatClass = Date.now() - new Date(session.heartbeat).getTime() < 120000 ? 'heartbeat-active' : 'heartbeat-inactive';
+                                 session.status === 'paused' ? 'status-paused' : 'status-inactive';
                 
                 html += \`
-                    <div class="session-item">
-                        <div class="session-info">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div>
-                                    <strong><i class="fas fa-shield-alt"></i> \${session.type === 'one_time_messaging' ? 'ONE TIME MESSAGING' : 'ADVANCED LOCKING'}</strong>
-                                    <span class="status-badge \${badgeClass}" style="margin-left: 10px;">\${session.status.toUpperCase()}</span>
-                                    <span class="heartbeat-indicator \${heartbeatClass}" title="Heartbeat"></span>
-                                </div>
-                                <div class="session-actions">
-                                    <button class="btn btn-danger btn-sm" onclick="stopMySessionSilent('\${session.sessionId}')">
-                                        <i class="fas fa-stop"></i> STOP
-                                    </button>
-                                    <button class="btn btn-warning btn-sm" onclick="recoverMySessionSilent('\${session.sessionId}')">
-                                        <i class="fas fa-medkit"></i> RECOVER
-                                    </button>
-                                </div>
+                    <div style="background: white; padding: 20px; border-radius: 10px; border-left: 4px solid var(--primary);">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <strong><i class="fas fa-shield-alt"></i> \${session.type.toUpperCase()}</strong>
+                                <span class="status-badge \${badgeClass}" style="margin-left: 10px;">\${session.status.toUpperCase()}</span>
                             </div>
-                            <p style="margin: 10px 0 5px 0;"><small>SESSION: \${session.sessionId.substring(0, 15)}...</small></p>
-                            <p style="margin: 5px 0;"><small>GROUP: \${session.groupUID}</small></p>
-                            <p style="margin: 5px 0;"><small>ACTIVITY: \${formatTime(Date.now() - new Date(session.lastActivity).getTime())} ago</small></p>
-                            \${session.monitoringInterval ? \`<p style="margin: 5px 0;"><small>INTERVAL: \${session.monitoringInterval}s</small></p>\` : ''}
+                            <button class="btn btn-danger btn-sm" onclick="stopMySession('\${session.sessionId}')">
+                                <i class="fas fa-stop"></i> STOP
+                            </button>
                         </div>
+                        <p style="margin: 10px 0 5px 0;"><small>SESSION: \${session.sessionId.substring(0, 15)}...</small></p>
+                        <p style="margin: 5px 0;"><small>GROUP: \${session.groupUID}</small></p>
+                        <p style="margin: 5px 0;"><small>UPTIME: \${formatTime(session.uptime)}</small></p>
+                        \${session.messagesSent ? \`<p style="margin: 5px 0;"><small>MESSAGES: \${session.messagesSent}</small></p>\` : ''}
+                        \${session.cookiesCount ? \`<p style="margin: 5px 0;"><small>COOKIES: \${session.cookiesCount}</small></p>\` : ''}
                     </div>
                 \`;
             });
@@ -4181,50 +4842,9 @@ app.get('/', (req, res) => {
             container.innerHTML = html;
         }
         
-        function displayPermanentSessionsSilent(sessions) {
-            const container = document.getElementById('myPermanentSessions');
-            if (!sessions || sessions.length === 0) {
-                container.innerHTML = \`
-                    <div style="text-align: center; padding: 40px; color: #666;">
-                        <i class="fas fa-database fa-3x"></i>
-                        <p style="margin-top: 10px;">NO PERMANENT SESSIONS</p>
-                    </div>
-                \`;
-                return;
-            }
-            
-            let html = '<div style="display: grid; gap: 15px;">';
-            sessions.forEach(session => {
-                const heartbeatClass = Date.now() - new Date(session.lastHeartbeat).getTime() < 3600000 ? 'heartbeat-active' : 'heartbeat-inactive';
-                
-                html += \`
-                    <div class="session-item">
-                        <div class="session-info">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div>
-                                    <strong><i class="fas fa-shield-alt"></i> \${session.type.toUpperCase()}</strong>
-                                    <span class="status-badge status-permanent" style="margin-left: 10px;">PERMANENT</span>
-                                    <span class="heartbeat-indicator \${heartbeatClass}" title="Heartbeat"></span>
-                                </div>
-                                <div class="session-actions">
-                                    <button class="btn btn-success btn-sm" onclick="activatePermanentSessionId('\${session.sessionId}')">
-                                        <i class="fas fa-play"></i> ACTIVATE
-                                    </button>
-                                </div>
-                            </div>
-                            <p style="margin: 10px 0 5px 0;"><small>ID: \${session.sessionId}</small></p>
-                            <p style="margin: 5px 0;"><small>CREATED: \${session.createdAt}</small></p>
-                            <p style="margin: 5px 0;"><small>LAST USED: \${session.lastUsed}</small></p>
-                        </div>
-                    </div>
-                \`;
-            });
-            html += '</div>';
-            container.innerHTML = html;
-        }
-        
-        async function stopMySessionSilent(sessionId) {
-            if (!currentUserId) {
+        async function stopMySession(sessionId) {
+            const userId = document.getElementById('myUserId').value.trim();
+            if (!userId) {
                 alert('Please enter your User ID first');
                 return;
             }
@@ -4235,247 +4855,22 @@ app.get('/', (req, res) => {
                 const response = await fetch('/api/stop-my-session-silent', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sessionId, userId: currentUserId })
+                    body: JSON.stringify({ sessionId, userId })
                 });
                 
                 const data = await response.json();
                 if (data.success) {
                     alert('Session stopped');
-                    loadMySessionsSilent();
+                    loadMySessions();
                 } else {
                     alert(\`Failed: \${data.error}\`);
                 }
             } catch (error) {
                 alert(\`Error: \${error.message}\`);
             }
-        }
-        
-        async function recoverMySessionSilent(sessionId) {
-            if (!currentUserId) {
-                alert('Please enter your User ID first');
-                return;
-            }
-            
-            if (!confirm('Recover this session?')) return;
-            
-            try {
-                const response = await fetch('/api/recover-session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sessionId })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    alert('Session recovery initiated');
-                    loadMySessionsSilent();
-                } else {
-                    alert(\`Failed: \${data.error}\`);
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
-            }
-        }
-        
-        async function activatePermanentSession() {
-            const sessionId = prompt('Enter Permanent Session ID to activate:');
-            if (!sessionId) return;
-            
-            try {
-                const response = await fetch('/api/activate-permanent-session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sessionId })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    alert(\`Permanent session activated: \${sessionId}\`);
-                    addLog('systemLogs', \`Permanent session activated: \${sessionId}\`, 'success');
-                    loadMySessionsSilent();
-                } else {
-                    alert(\`Failed: \${data.error}\`);
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
-            }
-        }
-        
-        function activatePermanentSessionId(sessionId) {
-            if (!confirm(\`Activate permanent session \${sessionId}?\`)) return;
-            
-            fetch('/api/activate-permanent-session', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    alert(\`Permanent session activated: \${sessionId}\`);
-                    loadMySessionsSilent();
-                } else {
-                    alert(\`Failed: \${data.error}\`);
-                }
-            })
-            .catch(error => {
-                alert(\`Error: \${error.message}\`);
-            });
-        }
-        
-        async function recoverAllSessions() {
-            if (!currentUserId) {
-                alert('Please enter your User ID first');
-                return;
-            }
-            
-            if (!confirm('Recover ALL sessions?')) return;
-            
-            try {
-                const response = await fetch(\`/api/my-active-sessions-silent/\${currentUserId}\`);
-                const data = await response.json();
-                
-                if (data.success) {
-                    let recovered = 0;
-                    for (const session of data.sessions) {
-                        if (session.status === 'paused' || Date.now() - new Date(session.heartbeat).getTime() > 300000) {
-                            await fetch('/api/recover-session', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ sessionId: session.sessionId })
-                            });
-                            recovered++;
-                        }
-                    }
-                    alert(\`Recovery initiated for \${recovered} sessions\`);
-                    loadMySessionsSilent();
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
-            }
-        }
-        
-        async function stopAllSessions() {
-            if (!currentUserId) {
-                alert('Please enter your User ID first');
-                return;
-            }
-            
-            if (!confirm('STOP ALL SESSIONS? This cannot be undone!')) return;
-            
-            try {
-                const response = await fetch(\`/api/my-active-sessions-silent/\${currentUserId}\`);
-                const data = await response.json();
-                
-                if (data.success) {
-                    let stopped = 0;
-                    for (const session of data.sessions) {
-                        await fetch('/api/stop-my-session-silent', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ 
-                                sessionId: session.sessionId, 
-                                userId: currentUserId 
-                            })
-                        });
-                        stopped++;
-                    }
-                    alert(\`Stopped \${stopped} sessions\`);
-                    loadMySessionsSilent();
-                }
-            } catch (error) {
-                alert(\`Error: \${error.message}\`);
-            }
-        }
-        
-        // System Status functions
-        async function refreshSystemStatus() {
-            try {
-                const response = await fetch('/api/system-status');
-                const data = await response.json();
-                
-                if (data.success) {
-                    document.getElementById('sysStatus').textContent = data.system.healthStatus;
-                    document.getElementById('sysMemory').textContent = \`\${(data.system.performanceMetrics.memoryUsage * 100).toFixed(2)}%\`;
-                    document.getElementById('sysSessions').textContent = data.sessions.length;
-                    document.getElementById('sysUptime').textContent = formatTime(data.system.performanceMetrics.uptime * 1000);
-                    
-                    const health = 100 - (data.system.crashCount * 10);
-                    document.getElementById('sysHealthBar').style.width = Math.max(0, Math.min(100, health)) + '%';
-                    
-                    addLog('systemLogs', 'System status refreshed', 'info');
-                }
-            } catch (error) {
-                console.error('Failed to refresh system status:', error);
-            }
-        }
-        
-        async function forceGarbageCollection() {
-            try {
-                const response = await fetch('/health');
-                const data = await response.json();
-                
-                if (data.status === 'OK') {
-                    alert('Memory cleaned successfully');
-                    addLog('systemLogs', 'Forced garbage collection', 'success');
-                    refreshSystemStatus();
-                }
-            } catch (error) {
-                alert('Error cleaning memory');
-            }
-        }
-        
-        async function performSystemRecovery() {
-            if (!confirm('Perform system recovery?')) return;
-            
-            try {
-                addLog('systemLogs', 'Manual system recovery initiated', 'warning');
-                
-                const response = await fetch('/health');
-                const data = await response.json();
-                
-                if (data.status === 'OK') {
-                    alert('System recovery completed');
-                    addLog('systemLogs', 'System recovery completed successfully', 'success');
-                    refreshSystemStatus();
-                }
-            } catch (error) {
-                alert('Recovery failed: ' + error.message);
-                addLog('systemLogs', \`Recovery failed: \${error.message}\`, 'error');
-            }
-        }
-        
-        async function backupAllSessions() {
-            if (!confirm('Create backup of all sessions?')) return;
-            
-            try {
-                addLog('systemLogs', 'Manual backup initiated', 'info');
-                alert('Backup process started in background');
-                addLog('systemLogs', 'Session backup completed', 'success');
-            } catch (error) {
-                alert('Backup failed: ' + error.message);
-            }
-        }
-        
-        function emergencyShutdown() {
-            if (!confirm('EMERGENCY SHUTDOWN - Are you sure?')) return;
-            
-            if (!confirm('This will stop ALL sessions immediately!')) return;
-            
-            addLog('systemLogs', 'EMERGENCY SHUTDOWN initiated by user', 'error');
-            alert('Emergency shutdown command sent. Sessions will be saved.');
         }
         
         // Utility functions
-        function readFile(file) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = (e) => resolve(e.target.result);
-                reader.onerror = (e) => reject(e);
-                reader.readAsText(file);
-            });
-        }
-        
         function addLog(containerId, message, level = 'info') {
             const container = document.getElementById(containerId);
             const logEntry = document.createElement('div');
@@ -4515,28 +4910,39 @@ app.get('/', (req, res) => {
             }
         }
         
+        function formatUptime(ms) {
+            const seconds = Math.floor(ms / 1000);
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            
+            return \`\${hours.toString().padStart(2, '0')}:\${minutes.toString().padStart(2, '0')}:\${secs.toString().padStart(2, '0')}\`;
+        }
+        
         // Initialize
         window.onload = function() {
             setInterval(() => {
                 const uptime = Date.now() - serverStartTime;
-                document.getElementById('serverUptime').textContent = formatTime(uptime);
+                document.getElementById('serverUptime').textContent = formatUptime(uptime);
             }, 1000);
             
-            // Start system status monitoring
-            systemStatusInterval = setInterval(() => {
-                if (document.getElementById('system_statusTab').classList.contains('active')) {
-                    refreshSystemStatus();
+            setInterval(async () => {
+                try {
+                    const response = await fetch('/api/stats-silent');
+                    const data = await response.json();
+                    if (data.success) {
+                        document.getElementById('activeSessions').textContent = data.activeSessions;
+                        document.getElementById('totalMessages').textContent = data.totalMessages;
+                        document.getElementById('sessionLimit').textContent = \`\${data.availableSlots} available\`;
+                    }
+                } catch (error) {
+                    console.error('Stats error:', error);
                 }
             }, 10000);
             
-            addLog('oneTimeMessagingLogs', 'System initialized with always-active sessions', 'info');
-            addLog('lockingLogs', 'Advanced locking system ready with 24/7 uptime', 'info');
-            addLog('systemLogs', 'Always Active System initialized', 'success');
-            
-            // Initial system status
-            setTimeout(() => {
-                refreshSystemStatus();
-            }, 2000);
+            addLog('singleMessagingLogs', 'System initialized', 'info');
+            addLog('multiMessagingLogs', 'System initialized', 'info');
+            addLog('lockingLogs', 'System initialized', 'info');
         };
     </script>
 </body>
@@ -4544,60 +4950,95 @@ app.get('/', (req, res) => {
     `);
 });
 
-// ==================== START SERVER ====================
+// ==================== START SERVER WITH AUTO-RECOVERY ====================
 const serverStartTime = Date.now();
+const autoRecovery = new AutoRecoverySystem();
 
-// Start anti-crash monitoring
-antiCrash.startMonitoring();
-
-// Catch unhandled exceptions
-process.on('uncaughtException', (error) => {
-    antiCrash.recordCrash(error);
-    console.error('🚨 UNCAUGHT EXCEPTION:', error.message);
+server.listen(PORT, '0.0.0.0', () => {
+    MinimalLogger.log(`🚀 Ultimate System started on port ${PORT}`);
+    MinimalLogger.log(`✅ Features: Safe Messaging, Advanced Locking, Individual Monitoring, Session Management`);
+    MinimalLogger.log(`📊 Session Limit: ${CONFIG.MAX_SESSIONS} concurrent sessions`);
     
-    setTimeout(() => {
-        antiCrash.performRecovery();
-    }, 1000);
+    autoRecovery.start();
+    
+    setInterval(() => {
+        cleanupOldSessions();
+    }, 24 * 60 * 60 * 1000);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    antiCrash.recordCrash(new Error(`Unhandled Rejection: ${reason}`));
-    console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-});
+function cleanupOldSessions() {
+    try {
+        const now = Date.now();
+        const maxAge = CONFIG.SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+        let cleanedCount = 0;
+        
+        for (const [sessionId, sessionData] of permanentSessions) {
+            if (now - sessionData.lastUsed > maxAge && !sessionData.isActive) {
+                permanentSessions.delete(sessionId);
+                
+                const sessionPath = path.join(__dirname, 'sessions', `permanent_${sessionId}.json`);
+                if (fs.existsSync(sessionPath)) {
+                    fs.unlinkSync(sessionPath);
+                }
+                
+                cleanedCount++;
+            }
+        }
+        
+        if (cleanedCount > 0) {
+            MinimalLogger.log(`Cleaned up ${cleanedCount} old sessions`);
+        }
+    } catch (error) {
+        MinimalLogger.error(`Cleanup error: ${error.message}`);
+    }
+}
 
-// Graceful shutdown
 process.on('SIGINT', () => {
-    console.log('🛑 Shutting down gracefully...');
+    MinimalLogger.log('🛑 Shutting down gracefully...');
     
-    antiCrash.saveAllSessions();
+    for (const [sessionId, session] of activeSessions) {
+        try {
+            if (session.api && session.api.getAppState) {
+                const userId = session.userId || 'unknown';
+                const type = session.type || 'unknown';
+                savePermanentSession(sessionId, session.api, userId, type);
+            }
+        } catch (error) {
+            MinimalLogger.error(`Failed to save session ${sessionId}: ${error.message}`);
+        }
+    }
     
     for (const [sessionId, timer] of sessionRefreshTracker) {
         clearTimeout(timer);
-    }
-    
-    for (const [sessionId, heartbeat] of sessionHeartbeats) {
-        clearInterval(heartbeat);
     }
     
     for (const [sessionId, session] of activeSessions) {
         if (session.messager) {
             session.messager.stop();
         }
+        if (session.messaging) {
+            session.messaging.stop();
+        }
         if (session.lockSystem) {
             session.lockSystem.stop();
         }
     }
     
+    autoRecovery.stop();
+    
     wss.close();
     server.close();
+    
+    MinimalLogger.log(`✅ All sessions saved. Total sessions: ${activeSessions.size}/${CONFIG.MAX_SESSIONS}`);
+    MinimalLogger.log('👋 Goodbye!');
     process.exit(0);
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server started on port ${PORT}`);
-    console.log(`✅ Features: Always Active Sessions • 24/7 Uptime • Auto-Recovery`);
-    console.log(`💓 Session Heartbeat: 30s interval`);
-    console.log(`🔄 Auto-Refresh: Every 48 hours`);
-    console.log(`🛡️ Health Check: http://localhost:${PORT}/health`);
-    console.log(`📊 System Status: http://localhost:${PORT}/api/system-status`);
+process.on('uncaughtException', (error) => {
+    MinimalLogger.error(`Uncaught Exception: ${error.message}`);
+    MinimalLogger.error(error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    MinimalLogger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
 });
