@@ -1,0 +1,28 @@
+{
+  "name": "raffay-multi-cookie-convo",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "facebook",
+    "ws3-fca",
+    "multi-cookie",
+    "messenger",
+    "express",
+    "websocket"
+  ],
+  "author": "Raffay",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.3",
+    "axios": "^1.6.8",
+    "uuid": "^9.0.1",
+    "ws3-fca": "^2.0.1"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
